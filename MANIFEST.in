@@ -1,0 +1,3 @@
+recursive-include src/vm_tools_common *.py
+recursive-include src/ansible_deployer *.py
+include src/ansible_deployer/ansible_callbacks/*.py

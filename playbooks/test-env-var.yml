@@ -1,0 +1,17 @@
+---
+- name: Test Environment Variable
+  hosts: all
+  gather_facts: no
+  
+  tasks:
+    - name: Show VM_IP environment variable
+      debug:
+        msg: "VM_IP environment variable is: {{ lookup('env', 'VM_IP') }}"
+    
+    - name: Show all environment variables containing VM
+      shell: env | grep VM || true
+      register: vm_env
+    
+    - name: Display VM environment variables
+      debug:
+        msg: "{{ vm_env.stdout_lines }}"

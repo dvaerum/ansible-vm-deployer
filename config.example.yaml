@@ -1,0 +1,12 @@
+# Libvirt settings
+libvirt_uri: "qemu:///system"
+
+# Libvirt network name to use for IP discovery (e.g., 'mgmt-network')
+# This is the network name from VM XML: <source network='mgmt-network'/>
+# If not specified, uses the first interface with an IP address
+# You can also specify this per-deployment with --network flag
+network: null  # or specify like: "mgmt-network"
+
+# Logging settings
+log_dir: "./logs"
+log_level: "INFO"

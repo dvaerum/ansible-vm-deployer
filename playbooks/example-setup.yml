@@ -1,0 +1,41 @@
+---
+- name: Example Setup Playbook
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Print host information
+      debug:
+        msg: "Deploying to {{ inventory_hostname }}"
+
+    - name: Update package cache (Debian/Ubuntu)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Install basic packages
+      package:
+        name:
+          - curl
+          - wget
+          - vim
+          - git
+        state: present
+
+    - name: Create test directory
+      file:
+        path: /opt/test
+        state: directory
+        mode: '0755'
+
+    - name: Write test file
+      copy:
+        content: "Deployment successful at {{ ansible_date_time.iso8601 }}"
+        dest: /opt/test/deployment.txt
+        mode: '0644'
+
+    - name: Display completion message
+      debug:
+        msg: "Playbook execution completed successfully"

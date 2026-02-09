@@ -1,0 +1,16 @@
+---
+- name: Test Deployment
+  hosts: all
+  gather_facts: no
+  
+  tasks:
+    - name: Test connection
+      ping:
+      
+    - name: Get timestamp
+      command: date
+      register: current_date
+      
+    - name: Show timestamp
+      debug:
+        msg: "Deployment successful at {{ current_date.stdout }}"

@@ -1,0 +1,21 @@
+---
+- name: Test Multi-VM Environment Variables
+  hosts: localhost
+  gather_facts: no
+  
+  tasks:
+    - name: Show all VM environment variables
+      debug:
+        msg: |
+          VM_IP_1: {{ lookup('env', 'VM_IP_1') }}
+          VM_IP_2: {{ lookup('env', 'VM_IP_2') }}
+          VM_IP_3: {{ lookup('env', 'VM_IP_3') }}
+          VM_IP_ALL: {{ lookup('env', 'VM_IP_ALL') }}
+    
+    - name: Show VM IPs as a list
+      debug:
+        msg: "All VM IPs: {{ lookup('env', 'VM_IP_ALL').split(',') }}"
+    
+    - name: Count VMs
+      debug:
+        msg: "Total VMs allocated: {{ lookup('env', 'VM_IP_ALL').split(',') | length }}"
