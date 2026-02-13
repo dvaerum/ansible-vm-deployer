@@ -98,7 +98,7 @@ class TestTagCleaner:
         mock_conn.lookupByName.return_value = mock_domain
         
         # Mock getting IP
-        async def mock_ssh_success(*args):
+        async def mock_ssh_success(*args, **kwargs):
             return "success"
         
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="192.168.1.100"), \
@@ -121,29 +121,46 @@ class TestTagCleaner:
             )
     
     @pytest.mark.asyncio
-    async def test_monitor_vm_no_ip(self, tag_cleaner, mock_domain, mock_conn):
-        """Test VM monitoring stops if no IP found."""
+    async def test_monitor_vm_no_ip_marks_broken(
+        self, mock_conn, vm_tracker, mock_domain
+    ):
+        """When max_wait_time is set and no IP is ever found, VM is marked broken."""
         mock_conn.lookupByName.return_value = mock_domain
+        config = SSHConfig(username="root", key_path="/test/key")
+        checker = SSHChecker(config, max_wait_time=0.1, check_interval=0.01)
+        cleaner = TagCleaner(
+            conn=mock_conn,
+            ssh_checker=checker,
+            vm_tracker=vm_tracker,
+            tags_to_remove=["test-tag"],
+            broken_tag="broken"
+        )
+
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value=None), \
-             patch.object(tag_cleaner.ssh_checker, 'wait_for_ssh') as mock_ssh, \
-             patch('vm_manager.tag_cleaner.remove_vm_tag') as mock_remove_tag:
-            
-            await tag_cleaner._monitor_vm(
+             patch.object(checker, 'wait_for_ssh') as mock_ssh, \
+             patch('vm_manager.tag_cleaner.remove_vm_tag') as mock_remove_tag, \
+             patch('vm_manager.tag_cleaner.add_vm_tag') as mock_add_tag:
+
+            await cleaner._monitor_vm(
                 "test-uuid-123",
                 "test-vm"
             )
-            
-            # SSH should not be called
+
+            # SSH should not be called (never got an IP)
             mock_ssh.assert_not_called()
             # Tag should not be removed
             mock_remove_tag.assert_not_called()
+            # VM should be marked broken
+            mock_add_tag.assert_called_once_with(
+                mock_conn, mock_domain, "broken"
+            )
     
     @pytest.mark.asyncio
     async def test_monitor_vm_ssh_failure(self, tag_cleaner, mock_domain, mock_conn):
         """Test VM monitoring stops if SSH fails (auth_failure)."""
         mock_conn.lookupByName.return_value = mock_domain
         
-        async def mock_ssh_failure(*args):
+        async def mock_ssh_failure(*args, **kwargs):
             return "auth_failure"
         
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="192.168.1.100"), \
@@ -278,7 +295,7 @@ class TestTagCleaner:
         cleaner = tag_cleaner_with_broken_tag
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_timeout(*args):
+        async def mock_ssh_timeout(*args, **kwargs):
             return "timeout"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="192.168.1.100"), \
@@ -302,7 +319,7 @@ class TestTagCleaner:
         """When broken_tag is None, SSH timeout should NOT add any tag."""
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_timeout(*args):
+        async def mock_ssh_timeout(*args, **kwargs):
             return "timeout"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="192.168.1.100"), \
@@ -331,7 +348,7 @@ class TestTagCleaner:
             broken_tag="broken"
         )
 
-        async def mock_ssh_timeout(*args):
+        async def mock_ssh_timeout(*args, **kwargs):
             return "timeout"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="192.168.1.100"), \
@@ -357,7 +374,7 @@ class TestTagCleaner:
         """After SSH success, _monitor_vm sleeps 5 seconds before removing tags."""
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_success(*args):
+        async def mock_ssh_success(*args, **kwargs):
             return "success"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="192.168.1.100"), \
@@ -384,7 +401,7 @@ class TestTagCleaner:
         """If _is_vm_in_use returns True, tags are NOT removed."""
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_success(*args):
+        async def mock_ssh_success(*args, **kwargs):
             return "success"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="192.168.1.100"), \
@@ -405,7 +422,7 @@ class TestTagCleaner:
         """If _is_vm_in_use returns False, tags ARE removed."""
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_success(*args):
+        async def mock_ssh_success(*args, **kwargs):
             return "success"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="192.168.1.100"), \
@@ -564,7 +581,7 @@ class TestTagCleaner:
         """_monitor_vm handles CancelledError and always calls stop_monitoring."""
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_hang(*args):
+        async def mock_ssh_hang(*args, **kwargs):
             # Simulate a long-running SSH check that gets cancelled
             await asyncio.sleep(100)
             return "success"
@@ -597,7 +614,7 @@ class TestTagCleaner:
         """stop_monitoring is called even on a successful path."""
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_success(*args):
+        async def mock_ssh_success(*args, **kwargs):
             return "success"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="192.168.1.100"), \
@@ -618,8 +635,11 @@ class TestTagCleaner:
         """stop_monitoring is called even when _monitor_vm hits an unexpected error."""
         mock_conn.lookupByName.return_value = mock_domain
 
-        with patch('vm_manager.tag_cleaner.get_vm_ip',
-                   side_effect=RuntimeError("unexpected")), \
+        # Patch _get_vm_ip_with_retry itself (not get_vm_ip) so the error
+        # escapes into the outer try/except in _monitor_vm, exercising
+        # the finally block's stop_monitoring call.
+        with patch.object(tag_cleaner, '_get_vm_ip_with_retry',
+                          side_effect=RuntimeError("unexpected")), \
              patch.object(vm_tracker, 'stop_monitoring', new_callable=AsyncMock) as mock_stop:
 
             await tag_cleaner._monitor_vm("test-uuid-123", "test-vm")
@@ -689,7 +709,7 @@ class TestTagCleanerRaceConditions:
         """
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_success(*args):
+        async def mock_ssh_success(*args, **kwargs):
             return "success"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="10.0.0.5"), \
@@ -719,7 +739,7 @@ class TestTagCleanerRaceConditions:
         """
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_success(*args):
+        async def mock_ssh_success(*args, **kwargs):
             return "success"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="10.0.0.5"), \
@@ -751,7 +771,7 @@ class TestTagCleanerRaceConditions:
         """
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_timeout(*args):
+        async def mock_ssh_timeout(*args, **kwargs):
             return "timeout"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="10.0.0.5"), \
@@ -809,7 +829,7 @@ class TestTagCleanerRaceConditions:
         mock_conn.lookupByName.return_value = mock_domain
         call_order = []
 
-        async def mock_ssh_success(*args):
+        async def mock_ssh_success(*args, **kwargs):
             return "success"
 
         original_is_in_use = cleaner._is_vm_in_use
@@ -889,7 +909,7 @@ class TestTagCleanerRaceConditions:
         """
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_auth_failure(*args):
+        async def mock_ssh_auth_failure(*args, **kwargs):
             return "auth_failure"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="10.0.0.5"), \
@@ -967,7 +987,7 @@ class TestOnBrokenScript:
         """After SSH timeout, both _mark_vm_broken and _run_on_broken_script are called."""
         mock_conn.lookupByName.return_value = mock_domain
 
-        async def mock_ssh_timeout(*args):
+        async def mock_ssh_timeout(*args, **kwargs):
             return "timeout"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="10.0.0.5"), \

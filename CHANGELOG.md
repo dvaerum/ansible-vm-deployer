@@ -40,6 +40,8 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
 
 - **Fix: Mid-run tag removal race condition** — Added `in_use` metadata check before removing the `used` tag. A playbook may reboot the VM mid-run (e.g., OS install), triggering vm-manager to detect the reboot and eventually SSH in. Without this check, vm-manager would remove the `used` tag while ansible-deployer was still actively orchestrating the VM, allowing another deployer to allocate it concurrently.
 
+- **Fix: VMs with no IP never marked broken** — IP resolution is now part of the overall `--max-wait-time` budget. Previously, if a VM never obtained an IP address, `_monitor_vm()` gave up after 30 seconds (10 attempts) and returned without marking the VM as broken. The VM would then reboot, vm-manager would start monitoring again, fail to get an IP, and the cycle would repeat forever. Now, IP resolution retries within the `max_wait_time` window, and if no IP is found within the budget, the VM is marked broken (with `--broken-tag`) and the `--on-broken` script is called, just like an SSH timeout. The `wait_for_ssh()` method accepts a `max_wait_time_override` parameter so the remaining time budget is correctly passed without mutating shared state across concurrent VMs.
+
 ### Added - VM Manager (cont.)
 
 - **Broken VM tagging** — VMs that fail SSH after `--max-wait-time` (default: 30 minutes) are now tagged with a configurable `--broken-tag` (default: `broken`) instead of retrying forever. The `used` tag is intentionally kept so the VM won't be reallocated by ansible-deployer.

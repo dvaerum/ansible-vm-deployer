@@ -62,7 +62,8 @@ class SSHChecker:
     async def wait_for_ssh(
         self,
         hostname: str,
-        vm_name: str
+        vm_name: str,
+        max_wait_time_override: Optional[float] = None
     ) -> str:
         """
         Wait for SSH to become available on a VM.
@@ -73,28 +74,36 @@ class SSHChecker:
         Args:
             hostname: IP address or hostname of the VM
             vm_name: Name of the VM (for logging)
+            max_wait_time_override: If provided, use this timeout instead of
+                self.max_wait_time. Used when IP resolution already consumed
+                part of the overall time budget.
             
         Returns:
             "success" if SSH succeeded with fresh boot confirmed
             "auth_failure" if SSH authentication failed (config issue)
             "timeout" if max_wait_time was exceeded
         """
+        effective_max_wait = (
+            max_wait_time_override
+            if max_wait_time_override is not None
+            else self.max_wait_time
+        )
         start_time = datetime.now()
         attempt = 0
         
         logger.info(
             f"Waiting for SSH on {vm_name} ({hostname}), "
             f"check interval: {self.check_interval}s"
-            + (f", max wait: {self.max_wait_time}s" if self.max_wait_time else ", no timeout")
+            + (f", max wait: {effective_max_wait:.0f}s" if effective_max_wait else ", no timeout")
         )
         
         while True:
             attempt += 1
             
             # Check if we've exceeded max wait time
-            if self.max_wait_time is not None:
+            if effective_max_wait is not None:
                 elapsed = (datetime.now() - start_time).total_seconds()
-                if elapsed >= self.max_wait_time:
+                if elapsed >= effective_max_wait:
                     logger.warning(
                         f"SSH check for {vm_name} ({hostname}) timed out after "
                         f"{elapsed:.1f}s ({attempt} attempts)"

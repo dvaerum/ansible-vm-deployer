@@ -7,6 +7,7 @@ Coordinates SSH checking and tag removal for VMs.
 import asyncio
 import logging
 import os
+from datetime import datetime
 from typing import List, Optional
 import libvirt
 
@@ -176,6 +177,10 @@ class TagCleaner:
         """
         Monitor a VM until SSH becomes available, then remove tags.
         
+        IP resolution and SSH checking are both governed by max_wait_time.
+        If the VM never gets an IP within the timeout, it is marked broken
+        just like an SSH timeout.
+        
         Args:
             vm_uuid: VM UUID
             vm_name: VM name
@@ -183,17 +188,56 @@ class TagCleaner:
         try:
             logger.info(f"Starting monitoring for VM {vm_name} (uuid={vm_uuid})")
             
-            # Get the VM's IP address (with retry logic)
-            ip_address = await self._get_vm_ip_with_retry(vm_name)
+            # Get the VM's IP address (with retry logic).
+            # If no IP is found within the short retry window, keep retrying
+            # as part of the overall max_wait_time budget. A VM that never
+            # gets an IP for 30 minutes is just as broken as one that never
+            # responds to SSH.
+            start_time = datetime.now()
+            ip_address = None
+            ip_attempt_round = 0
             
-            if not ip_address:
-                logger.warning(f"VM {vm_name} has no IP address, cannot check SSH")
-                return
+            while ip_address is None:
+                ip_attempt_round += 1
+                ip_address = await self._get_vm_ip_with_retry(vm_name)
+                
+                if ip_address:
+                    break
+                
+                # Check if we've exceeded max_wait_time
+                if self.ssh_checker.max_wait_time is not None:
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    if elapsed >= self.ssh_checker.max_wait_time:
+                        logger.warning(
+                            f"VM {vm_name} has no IP address after {elapsed:.1f}s "
+                            f"({ip_attempt_round} rounds of IP resolution), "
+                            "marking as broken"
+                        )
+                        await self._mark_vm_broken(vm_name, vm_uuid)
+                        await self._run_on_broken_script(vm_name, vm_uuid, None)
+                        return
+                
+                # Wait before retrying IP resolution
+                logger.info(
+                    f"VM {vm_name} has no IP address, will retry IP resolution "
+                    f"in {self.ssh_checker.check_interval}s "
+                    f"(round {ip_attempt_round})"
+                )
+                await asyncio.sleep(self.ssh_checker.check_interval)
             
             logger.info(f"VM {vm_name} has IP address {ip_address}")
             
-            # Wait for SSH to become available
-            ssh_result = await self.ssh_checker.wait_for_ssh(ip_address, vm_name)
+            # Wait for SSH to become available.
+            # Subtract the time already spent on IP resolution from the
+            # remaining budget so the total doesn't exceed max_wait_time.
+            remaining_time = None
+            if self.ssh_checker.max_wait_time is not None:
+                elapsed_for_ip = (datetime.now() - start_time).total_seconds()
+                remaining_time = max(0, self.ssh_checker.max_wait_time - elapsed_for_ip)
+            
+            ssh_result = await self.ssh_checker.wait_for_ssh(
+                ip_address, vm_name, max_wait_time_override=remaining_time
+            )
             
             if ssh_result == "timeout":
                 logger.warning(
