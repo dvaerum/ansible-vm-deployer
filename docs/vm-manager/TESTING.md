@@ -17,25 +17,25 @@ Comprehensive testing documentation for VM Manager, covering unit tests, manual 
 
 ### Test Coverage
 
-The project has **294 comprehensive unit tests** covering all core functionality, race condition fixes, broken VM handling, auto-exclude behavior, and the `--on-broken` script hook:
+The project has **323 comprehensive unit tests** covering all core functionality, race condition fixes, broken VM handling, auto-exclude behavior, the `--on-broken` script hook, and stale tag scanning:
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
 | `tests/conftest.py` | Fixtures | `make_mock_domain()`, `make_mock_conn()` helpers |
 | `tests/test_tag_filters.py` | 14 | `vm_matches_tags()` — required/exclude tags |
-| `tests/test_vm_operations.py` | 33 | Tag CRUD, IP resolution, state strings |
-| `tests/test_metadata_manager.py` | 30 | MetadataManager get/set/claim/clear |
-| `tests/test_allocate_vms.py` | 31 | VM allocation with auto-exclude broken |
-| `tests/vm_manager/test_daemon.py` | 40 | Event filtering, stale tags, startup, auto-exclude broken_tag |
-| `tests/vm_manager/test_tag_cleaner.py` | ~25 | Race conditions #3/#6/#7, broken tag, in_use check, on-broken script |
-| `tests/vm_manager/test_ssh_checker.py` | ~11 | Uptime verification, string return values |
-| `tests/vm_manager/test_event_monitor.py` | ~4 | Reboot callback registration |
-| `tests/vm_manager/test_vm_tracker.py` | ~8 | Session management, debouncing |
-| **Total** | **294** | All race conditions, broken VM handling, auto-exclude, on-broken |
+| `tests/test_vm_operations.py` | 45 | Tag CRUD, IP resolution, state strings (includes parametrized) |
+| `tests/test_metadata_manager.py` | 41 | MetadataManager get/set/claim/clear |
+| `tests/test_allocate_vms.py` | 37 | VM allocation with auto-exclude broken |
+| `tests/vm_manager/test_daemon.py` | 64 | Event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag |
+| `tests/vm_manager/test_tag_cleaner.py` | 42 | Race conditions #3/#6/#7, broken tag, in_use check, on-broken script, stale tag removal |
+| `tests/vm_manager/test_ssh_checker.py` | 23 | Uptime verification, string return values |
+| `tests/vm_manager/test_event_monitor.py` | 15 | Reboot callback registration |
+| `tests/vm_manager/test_vm_tracker.py` | 7 | Session management, debouncing |
+| **Total** | **323** | All race conditions, broken VM handling, auto-exclude, on-broken, stale scan |
 
 ### Test Types
 
-1. **Unit Tests** (294 tests)
+1. **Unit Tests** (323 tests)
    - Mocked dependencies (libvirt, paramiko)
    - Fast execution (<1 minute)
    - Run automatically in CI/CD
@@ -58,7 +58,7 @@ cd /path/to/ansible-vm-deployer
 sudo nix develop -c python3 -m pytest tests/ -v
 
 # Output:
-# 294 passed
+# 323 passed
 ```
 
 ### VM Manager Tests Only
@@ -164,7 +164,7 @@ async def test_multiple_concurrent_vms(self):
 
 ---
 
-### test_ssh_checker.py (14 tests)
+### test_ssh_checker.py (23 tests)
 
 Tests SSH connectivity verification with mocked paramiko.
 
@@ -234,7 +234,7 @@ def test_ssh_connect_no_auth_method(self):
 
 ---
 
-### test_tag_cleaner.py (~25 tests)
+### test_tag_cleaner.py (42 tests)
 
 Tests workflow orchestration, IP retry logic, broken VM tagging, in_use checks, and on-broken script hook.
 
@@ -296,7 +296,7 @@ async def test_remove_multiple_tags(self):
 
 ---
 
-### test_event_monitor.py (~4 tests)
+### test_event_monitor.py (15 tests)
 
 Tests libvirt event loop integration and reboot callback registration.
 
@@ -656,7 +656,7 @@ fi
 
 ### Test Performance
 
-- **Unit tests**: ~37 seconds for all 294 tests
+- **Unit tests**: ~70 seconds for all 323 tests
 - **Fast enough** for pre-commit hooks
 - **Parallelizable** for CI/CD
 

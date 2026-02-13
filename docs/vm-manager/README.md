@@ -40,6 +40,7 @@ This tool is ideal for automated provisioning pipelines where you need to know w
 - ✅ **Broken VM Tagging**: VMs that fail SSH after timeout are tagged `broken` for visibility
 - ✅ **Auto-Exclude Broken VMs**: Daemon auto-excludes broken VMs from monitoring; deployer auto-excludes them from allocation
 - ✅ **On-Broken Script Hook**: Optional external script called when a VM is marked broken (`--on-broken`)
+- ✅ **Periodic Stale Tag Scan**: Background loop detects and removes stale `used` tags from VMs that were never rebooted after deploy
 - ✅ **Retry Logic**: Intelligent retry for both SSH and IP address resolution (skips loopback IPs)
 - ✅ **Debouncing**: Prevents duplicate processing during VM reboots
 - ✅ **Parallel Processing**: Handle multiple VMs concurrently with asyncio
@@ -184,11 +185,19 @@ When a VM fails SSH checks for `--max-wait-time` seconds, it is tagged with `--b
 
 The script has a 60-second timeout. Non-zero exit codes are logged as warnings but don't affect vm-manager operation.
 
+### Stale Tag Scanning
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--stale-scan-interval SECONDS` | 300 | Interval between periodic stale tag scans (0 = disabled) |
+
+Periodically scans all running VMs and removes stale `used` tags directly (without SSH). A tag is stale when the VM has a removable tag in its inactive XML but is no longer actively in use (`in_use=false` or no metadata). This catches VMs where the deployer finished but the VM was never rebooted.
+
 ### Startup Behavior
 
 | Argument | Description |
 |----------|-------------|
-| `--check-existing` | Check existing running VMs at startup |
+| `--check-existing` | Check existing running VMs at startup (actively in-use VMs go through SSH monitoring; stale tags are removed directly) |
 
 ### Connection & Logging
 
@@ -248,7 +257,7 @@ vm-manager \
 vm-manager \
   --tag ci-test \
   --ssh-username ci \
-  --ssh-key /ci/keys/id_rsa \
+  --ssh-key /run/secrets/ci-ssh-key \
   --max-wait-time 300 \
   --log-level debug
 ```
@@ -317,8 +326,8 @@ For detailed architecture documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 The project has comprehensive test coverage:
 
-- **294 total tests** (100% pass rate)
-  - Covers all 7 race condition fixes, broken VM handling, auto-exclude behavior, and `--on-broken` script hook
+- **323 total tests** (100% pass rate)
+  - Covers all 7 race condition fixes, broken VM handling, auto-exclude behavior, `--on-broken` script hook, and stale tag scanning
   - Tests cover: tag filters, VM operations, metadata management, VM allocation, daemon behavior, tag cleaning, SSH checking, event monitoring, and VM tracking
 
 ### Run Tests

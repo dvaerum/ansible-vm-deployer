@@ -41,6 +41,9 @@ let
       # Startup behavior
       ++ optional cfg.checkExisting "--check-existing"
       
+      # Stale tag scan
+      ++ [ "--stale-scan-interval ${toString cfg.staleScanInterval}" ]
+      
       # Connection and logging
       ++ [ "--libvirt-uri ${escapeShellArg cfg.libvirtUri}" ]
       ++ [ "--log-level ${cfg.logLevel}" ]
@@ -178,6 +181,18 @@ in {
       default = false;
       description = ''
         Check existing running VMs at startup and remove tags if SSH is ready.
+      '';
+    };
+
+    staleScanInterval = mkOption {
+      type = types.ints.unsigned;
+      default = 300;
+      example = 600;
+      description = ''
+        Interval in seconds between periodic scans for stale 'used' tags.
+        Removes tags from VMs that are no longer actively in use but still
+        have a 'used' tag (e.g., because the VM was never rebooted after
+        the deploy finished). Set to 0 to disable. Default: 300 (5 minutes).
       '';
     };
 

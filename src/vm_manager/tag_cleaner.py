@@ -108,12 +108,10 @@ class TagCleaner:
         Returns:
             IP address string, or None if not found after all attempts
         """
-        loop = asyncio.get_event_loop()
-        
         for attempt in range(1, max_attempts + 1):
             try:
                 # Look up domain fresh (thread-safe)
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 
                 def get_ip_for_vm():
                     """Helper to look up domain and get IP in executor thread"""
@@ -269,7 +267,7 @@ class TagCleaner:
         Returns:
             True if VM has in_use=true in metadata, False otherwise
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         
         try:
             def check_in_use():
@@ -312,7 +310,7 @@ class TagCleaner:
             )
             return
         
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         
         try:
             logger.warning(
@@ -372,7 +370,7 @@ class TagCleaner:
         
         try:
             # Gather VM tags
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             
             def get_tags():
                 try:
@@ -448,6 +446,27 @@ class TagCleaner:
                 exc_info=True
             )
 
+    async def remove_stale_tags(self, domain: libvirt.virDomain) -> None:
+        """
+        Remove stale tags from a VM directly, without waiting for SSH.
+        
+        Used by the stale tag scan and --check-existing startup scan for VMs
+        that have removable tags but are not actively in use (in_use=false or
+        no metadata). These VMs don't need an SSH check — the deploy already
+        finished.
+        
+        Args:
+            domain: The libvirt domain to clean
+        """
+        try:
+            vm_name = domain.name()
+            vm_uuid = domain.UUIDString()
+        except libvirt.libvirtError as e:
+            logger.error(f"Failed to get VM info for stale tag removal: {e}")
+            return
+        
+        await self._remove_tags(vm_name, vm_uuid)
+    
     async def _remove_tags(
         self,
         vm_name: str,
@@ -462,7 +481,7 @@ class TagCleaner:
         """
         # Use run_in_executor to run libvirt calls in thread pool
         # (libvirt is synchronous, but we're in an async context)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         
         for tag in self.tags_to_remove:
             try:

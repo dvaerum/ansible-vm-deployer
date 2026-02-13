@@ -122,10 +122,16 @@ sudo nixos-rebuild switch --flake .#your-hostname
 - **Example**: `/path/to/handler.sh`
 - **Description**: Path to an external script to run when a VM is marked broken. The script receives VM information via environment variables: `VM_NAME`, `VM_UUID`, `VM_IP`, `VM_TAGS`, `VM_BROKEN_TAG`, `VM_WAIT_TIME`, `LIBVIRT_URI`. The script runs asynchronously with a 60-second timeout. Non-zero exit codes are logged as warnings but don't affect vm-manager operation.
 
+#### `services.vm-manager.staleScanInterval`
+- **Type**: `unsigned integer`
+- **Default**: `300`
+- **Example**: `600`
+- **Description**: Interval in seconds between periodic scans for stale `used` tags. Removes tags from VMs that are no longer actively in use but still have a `used` tag (e.g., because the VM was never rebooted after the deploy finished). Set to `0` to disable.
+
 #### `services.vm-manager.checkExisting`
 - **Type**: `boolean`
 - **Default**: `false`
-- **Description**: Check existing running VMs at startup
+- **Description**: Check existing running VMs at startup. Actively in-use VMs go through SSH monitoring; stale tags are removed directly.
 
 #### `services.vm-manager.libvirtUri`
 - **Type**: `string`
@@ -185,9 +191,10 @@ sudo nixos-rebuild switch --flake .#your-hostname
     checkExisting = true;
     
     checkInterval = 5;
-    maxWaitTime = 300;       # 5 minutes for CI (shorter than default 30 min)
-    brokenTag = "ci-broken"; # Custom broken tag for CI monitoring
+    maxWaitTime = 300;         # 5 minutes for CI (shorter than default 30 min)
+    brokenTag = "ci-broken";   # Custom broken tag for CI monitoring
     onBroken = /opt/scripts/notify-broken-vm.sh;  # Alert on broken VMs
+    staleScanInterval = 120;   # Scan for stale tags every 2 minutes
     
     logLevel = "debug";
   };

@@ -39,7 +39,7 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 **Purpose:** Monitor VMs and automatically manage tags based on SSH connectivity.
 
 **Maturity:** Newly released, production-ready  
-**Test Coverage:** 41 tests, 100% pass rate  
+**Test Coverage:** 151 tests, 100% pass rate  
 **Documentation:** Complete (2,400+ lines)
 
 **Key Features:**
@@ -72,9 +72,9 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 - ✅ Shared library (`vm_tools_common`)
 
 #### Testing
-- ✅ 41 comprehensive unit tests (894 lines)
+- ✅ 151 VM Manager unit tests
 - ✅ 8 manual tests with real VMs
-- ✅ 100% test pass rate (56/56 total)
+- ✅ 100% test pass rate (323/323 total)
 - ✅ Mocked dependencies for isolation
 
 #### Documentation
@@ -96,21 +96,22 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 
 | Component | Lines of Code | Tests | Documentation |
 |-----------|---------------|-------|---------------|
-| Ansible Deployer | ~2,000 | 15 | ~3,000 |
-| VM Manager | 1,466 | 41 | 2,404 |
+| Ansible Deployer | ~2,000 | 172 | ~3,000 |
+| VM Manager | 1,466 | 151 | 2,404 |
 | Shared Library | ~600 | Covered by both | - |
-| **Total** | **~4,066** | **56** | **5,404+** |
+| **Total** | **~4,066** | **323** | **5,404+** |
 
 ### Test Coverage
 
 ```
-Total Tests: 56/56 (100% pass rate)
-├── Ansible Deployer: 15 tests
-└── VM Manager: 41 tests
-    ├── test_vm_tracker.py: 8 tests
-    ├── test_ssh_checker.py: 14 tests
-    ├── test_tag_cleaner.py: 11 tests
-    └── test_event_monitor.py: 8 tests
+Total Tests: 323/323 (100% pass rate)
+├── Shared/Deployer: 172 tests
+└── VM Manager: 151 tests
+    ├── test_daemon.py: 64 tests
+    ├── test_tag_cleaner.py: 42 tests
+    ├── test_ssh_checker.py: 23 tests
+    ├── test_event_monitor.py: 15 tests
+    └── test_vm_tracker.py: 7 tests
 ```
 
 ### Documentation Coverage
@@ -173,8 +174,8 @@ ansible-vm-deployer/
 │   ├── example-configuration.nix # Examples
 │   └── README.md              # Module docs
 ├── tests/
-│   ├── ansible_deployer/      # 15 tests
-│   └── vm_manager/            # 41 tests (NEW)
+│   ├── ansible_deployer/      # Deployer + shared tests
+│   └── vm_manager/            # 151 tests
 ├── playbooks/                 # Example playbooks
 ├── flake.nix                  # Nix packages + overlay
 ├── pyproject.toml             # Python packaging
@@ -336,7 +337,7 @@ These tools work together to provide complete VM lifecycle management:
 
 - Added complete VM Manager tool (1,466 lines)
 - Created shared library (`vm_tools_common`)
-- Added 41 unit tests (100% pass rate)
+- Added 151 unit tests (100% pass rate)
 - Created comprehensive documentation (2,404 lines)
 - Added NixOS module with examples
 - Updated project structure and README
@@ -420,7 +421,7 @@ Dennis Vestergaard Værum (github@varum.dk)
 
 **Project Quality Metrics:**
 
-- ✅ 100% test pass rate (56/56 tests)
+- ✅ 100% test pass rate (323/323 tests)
 - ✅ Comprehensive documentation (5,400+ lines)
 - ✅ Production-ready code quality
 - ✅ Professional project structure

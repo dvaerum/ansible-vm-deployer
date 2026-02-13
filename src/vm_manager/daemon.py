@@ -1,7 +1,11 @@
 """
 Main daemon loop for vm-manager.
 
-Orchestrates all components and manages the daemon lifecycle.
+Orchestrates all components and manages the daemon lifecycle:
+- Event-driven VM monitoring (start/stop/reboot events)
+- Startup scan of existing running VMs (--check-existing)
+- Periodic stale tag scanning (--stale-scan-interval)
+- Boot management modes (--boot-at-start, --boot-always)
 """
 
 import asyncio
@@ -11,6 +15,7 @@ import sys
 from typing import List, Optional
 import libvirt
 
+from ansible_deployer.metadata_manager import MetadataManager
 from vm_tools_common.libvirt_connection import LibvirtConnection
 from vm_tools_common.tag_filters import vm_matches_tags
 from vm_tools_common.vm_operations import get_vm_tags
@@ -47,7 +52,8 @@ class VMManagerDaemon:
         boot_at_start: bool,
         boot_always: bool,
         broken_tag: Optional[str] = None,
-        on_broken: Optional[str] = None
+        on_broken: Optional[str] = None,
+        stale_scan_interval: int = 300
     ):
         """
         Initialize the daemon.
@@ -65,6 +71,7 @@ class VMManagerDaemon:
             boot_always: Continuously boot matching shutdown VMs
             broken_tag: Tag to add when SSH times out (None = don't tag)
             on_broken: Path to external script to run when a VM is marked broken (None = disabled)
+            stale_scan_interval: Seconds between stale tag scans (0 = disabled)
         """
         self.libvirt_uri = libvirt_uri
         self.ssh_config = ssh_config
@@ -78,6 +85,7 @@ class VMManagerDaemon:
         self.boot_always = boot_always
         self.broken_tag = broken_tag
         self.on_broken = on_broken
+        self.stale_scan_interval = stale_scan_interval
         
         # Auto-exclude broken VMs from monitoring/booting.
         # Without this, the daemon would re-monitor broken VMs on every
@@ -99,6 +107,7 @@ class VMManagerDaemon:
         # Lifecycle
         self._shutdown_event = asyncio.Event()
         self._running = False
+        self._background_tasks: List[asyncio.Task] = []
     
     async def start(self) -> None:
         """
@@ -168,7 +177,13 @@ class VMManagerDaemon:
             
             # If boot_always, start the continuous boot loop
             if self.boot_always:
-                asyncio.create_task(self._continuous_boot_loop())
+                task = asyncio.create_task(self._continuous_boot_loop())
+                self._background_tasks.append(task)
+            
+            # Start stale tag scan loop
+            if self.stale_scan_interval > 0:
+                task = asyncio.create_task(self._stale_tag_scan_loop())
+                self._background_tasks.append(task)
         
         except Exception as e:
             logger.error(f"Failed to start daemon: {e}", exc_info=True)
@@ -201,6 +216,16 @@ class VMManagerDaemon:
         
         logger.info("Stopping VM Manager daemon")
         self._running = False
+        
+        # Cancel background tasks (boot loop, stale scan loop)
+        for task in self._background_tasks:
+            task.cancel()
+        for task in self._background_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._background_tasks.clear()
         
         # Stop event monitoring
         if self.event_monitor:
@@ -304,73 +329,38 @@ class VMManagerDaemon:
             logger.error(f"Error checking VM tags: {e}")
             return False
     
-    def _is_vm_actively_in_use(self, domain: libvirt.virDomain) -> bool:
+    def _is_vm_stale(self, domain: libvirt.virDomain) -> bool:
         """
-        Check if a VM is actively being used (not a stale tag from old run).
+        Check if a VM has a stale 'used' tag that should be cleaned up.
+        
+        A VM is stale if it has a removable tag (e.g., 'used') in its
+        inactive XML but is NOT actively being used by ansible-deployer
+        (in_use metadata is false or absent).
         
         Args:
             domain: The domain to check
             
         Returns:
-            True if VM is actively in use, False if tag is stale
+            True if the VM has a stale tag that should be removed
         """
         try:
-            from datetime import datetime, timedelta
+            # Check if any removable tags exist in the inactive XML
+            vm_tags = get_vm_tags(domain)
+            if not any(tag in vm_tags for tag in self.tags_to_remove):
+                return False
             
-            # Try to get metadata
+            # Check metadata — if in_use is true, it's actively being used
             try:
-                metadata_xml = domain.metadata(
-                    libvirt.VIR_DOMAIN_METADATA_ELEMENT,
-                    "http://example.com/vm_metadata",
-                    0
-                )
-                
-                # Parse metadata for in_use flag and started_at timestamp
-                in_use = False
-                started_at = None
-                
-                for line in metadata_xml.strip().split('\n'):
-                    line = line.strip()
-                    if line.startswith('in_use:'):
-                        value = line.split(':', 1)[1].strip()
-                        in_use = value.lower() == 'true'
-                    elif line.startswith('started_at:'):
-                        started_at_str = line.split(':', 1)[1].strip()
-                        try:
-                            # Parse ISO format timestamp
-                            started_at = datetime.fromisoformat(started_at_str.replace('Z', '+00:00'))
-                        except:
-                            pass
-                
-                # If in_use is true, it's actively being used
-                if in_use:
-                    return True
-                
-                # If started_at is within last 10 minutes, consider it active
-                if started_at:
-                    age = datetime.now(started_at.tzinfo) - started_at
-                    if age < timedelta(minutes=10):
-                        return True
-                
-                # Metadata exists but VM is not actively in use
-                logger.info(
-                    f"VM {domain.name()} has 'used' tag but is not actively in use "
-                    f"(in_use={in_use}, started_at={started_at}) - skipping"
-                )
-                return False
-                
-            except libvirt.libvirtError:
-                # No metadata means tag might be stale, but we can't be sure
-                # Skip it to be safe (avoids processing stale tags)
-                logger.info(
-                    f"VM {domain.name()} has 'used' tag but no metadata - "
-                    "likely stale from old run, skipping"
-                )
-                return False
-                
+                metadata_mgr = MetadataManager(domain)
+                if metadata_mgr.is_in_use():
+                    return False
+            except Exception:
+                pass  # No metadata or error reading it — treat as stale
+            
+            return True
+            
         except Exception as e:
-            logger.warning(f"Error checking if VM {domain.name()} is in use: {e}")
-            # On error, assume not in use to avoid processing stale tags
+            logger.warning(f"Error checking if VM {domain.name()} is stale: {e}")
             return False
     
     async def _check_existing_vms(self) -> None:
@@ -378,7 +368,8 @@ class VMManagerDaemon:
         Check existing running VMs at startup (--check-existing mode).
         
         Scans all running VMs and processes any that match filters.
-        Only processes VMs that are actively being used (not stale tags).
+        VMs that are actively in use (in_use=true) are monitored via SSH.
+        VMs with stale tags (in_use=false or no metadata) get tags removed directly.
         """
         logger.info("Checking existing running VMs")
         
@@ -392,14 +383,25 @@ class VMManagerDaemon:
             
             for domain in domains:
                 try:
-                    if self._should_monitor_vm(domain):
-                        # Check if VM is actively in use (not stale tag)
-                        if not self._is_vm_actively_in_use(domain):
-                            continue
-                        
-                        vm_name = domain.name()
-                        logger.info(f"Processing existing VM: {vm_name}")
-                        await self.tag_cleaner.handle_vm_started(domain)
+                    if not self._should_monitor_vm(domain):
+                        continue
+                    
+                    vm_name = domain.name()
+                    
+                    if self._is_vm_stale(domain):
+                        # Stale tag — remove directly without SSH wait
+                        logger.info(
+                            f"VM {vm_name} has stale removable tags "
+                            f"(in_use=false or no metadata), removing directly"
+                        )
+                        await self.tag_cleaner.remove_stale_tags(domain)
+                    else:
+                        # Check if it has removable tags and is actively in use
+                        vm_tags = get_vm_tags(domain)
+                        has_removable = any(tag in vm_tags for tag in self.tags_to_remove)
+                        if has_removable:
+                            logger.info(f"Processing existing VM (actively in use): {vm_name}")
+                            await self.tag_cleaner.handle_vm_started(domain)
                 except Exception as e:
                     logger.error(
                         f"Error processing existing VM: {e}",
@@ -408,6 +410,80 @@ class VMManagerDaemon:
         
         except Exception as e:
             logger.error(f"Error checking existing VMs: {e}", exc_info=True)
+    
+    async def _stale_tag_scan_loop(self) -> None:
+        """
+        Periodically scan all VMs and remove stale 'used' tags.
+        
+        A tag is stale when:
+        - VM has a removable tag (e.g., 'used') in its inactive XML
+        - VM metadata shows in_use=false (or has no metadata)
+        - VM is not currently being monitored by an active SSH-wait task
+        
+        This catches VMs where the deployer finished but the VM was never
+        rebooted, so vm-manager never got an event to trigger cleanup.
+        """
+        logger.info(
+            f"Started stale tag scan loop (interval: {self.stale_scan_interval}s)"
+        )
+        
+        try:
+            while self._running:
+                await asyncio.sleep(self.stale_scan_interval)
+                
+                if not self._running:
+                    break
+                
+                try:
+                    await self._run_stale_tag_scan()
+                except Exception as e:
+                    logger.error(f"Error in stale tag scan: {e}", exc_info=True)
+        
+        except asyncio.CancelledError:
+            logger.info("Stale tag scan loop cancelled")
+        finally:
+            logger.info("Stale tag scan loop stopped")
+    
+    async def _run_stale_tag_scan(self) -> None:
+        """
+        Run a single stale tag scan across all running VMs.
+        """
+        try:
+            domains = self.conn.listAllDomains(
+                libvirt.VIR_CONNECT_LIST_DOMAINS_RUNNING
+            )
+        except Exception as e:
+            logger.error(f"Failed to list domains for stale scan: {e}")
+            return
+        
+        cleaned = 0
+        for domain in domains:
+            try:
+                if not self._should_monitor_vm(domain):
+                    continue
+                
+                vm_name = domain.name()
+                vm_uuid = domain.UUIDString()
+                
+                # Skip VMs currently being monitored (SSH wait in progress)
+                if self.vm_tracker and await self.vm_tracker.is_monitoring(vm_uuid):
+                    continue
+                
+                if self._is_vm_stale(domain):
+                    logger.info(
+                        f"Stale tag scan: VM {vm_name} has stale removable tags, "
+                        "removing directly"
+                    )
+                    await self.tag_cleaner.remove_stale_tags(domain)
+                    cleaned += 1
+            
+            except Exception as e:
+                logger.error(f"Error scanning VM for stale tags: {e}")
+        
+        if cleaned > 0:
+            logger.info(f"Stale tag scan: cleaned {cleaned} VM(s)")
+        else:
+            logger.debug("Stale tag scan: no stale tags found")
     
     async def _boot_matching_vms_once(self) -> None:
         """
@@ -491,7 +567,8 @@ async def run_daemon(
     boot_at_start: bool,
     boot_always: bool,
     broken_tag: Optional[str] = None,
-    on_broken: Optional[str] = None
+    on_broken: Optional[str] = None,
+    stale_scan_interval: int = 300
 ) -> None:
     """
     Run the VM Manager daemon.
@@ -511,6 +588,7 @@ async def run_daemon(
         boot_always: Continuously boot matching shutdown VMs
         broken_tag: Tag to add when SSH times out (None = don't tag)
         on_broken: Path to external script to run when a VM is marked broken (None = disabled)
+        stale_scan_interval: Seconds between stale tag scans (0 = disabled)
     """
     daemon = VMManagerDaemon(
         libvirt_uri=libvirt_uri,
@@ -524,11 +602,12 @@ async def run_daemon(
         boot_at_start=boot_at_start,
         boot_always=boot_always,
         broken_tag=broken_tag,
-        on_broken=on_broken
+        on_broken=on_broken,
+        stale_scan_interval=stale_scan_interval
     )
     
     # Setup signal handlers for graceful shutdown
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     
     def signal_handler(sig):
         logger.info(f"Received signal {sig}, initiating shutdown")

@@ -32,6 +32,9 @@ Examples:
 
   # Check existing running VMs
   vm-manager --tag used --ssh-username root --ssh-key ~/.ssh/id_rsa --check-existing
+
+  # With custom stale tag scan interval (or disable with 0)
+  vm-manager --tag used --ssh-username root --ssh-key ~/.ssh/id_rsa --stale-scan-interval 120
         """
     )
 
@@ -137,6 +140,17 @@ Examples:
         help="Check existing running VMs at startup and remove tags if SSH ready"
     )
 
+    # Stale tag scan
+    parser.add_argument(
+        "--stale-scan-interval",
+        type=int,
+        default=300,
+        metavar="SECONDS",
+        help="Interval between stale tag scans in seconds (default: 300 = 5 minutes). "
+             "Scans all VMs and removes 'used' tags from VMs that are no longer actively in use. "
+             "Set to 0 to disable."
+    )
+
     # Libvirt connection
     parser.add_argument(
         "--libvirt-uri",
@@ -165,6 +179,10 @@ Examples:
     # Validate password file exists
     if args.ssh_password_file and not args.ssh_password_file.exists():
         parser.error(f"Password file not found: {args.ssh_password_file}")
+
+    # Validate stale-scan-interval is non-negative
+    if args.stale_scan_interval < 0:
+        parser.error("--stale-scan-interval must be a non-negative integer (0 to disable)")
 
     # Validate on-broken script exists and is executable
     if args.on_broken:
@@ -211,6 +229,15 @@ Examples:
         on_broken = str(args.on_broken)
         logger.info(f"On-broken script: {on_broken}")
     
+    if args.stale_scan_interval > 0:
+        interval = args.stale_scan_interval
+        if interval >= 60:
+            logger.info(f"Stale tag scan interval: {interval}s ({interval // 60} minutes)")
+        else:
+            logger.info(f"Stale tag scan interval: {interval}s")
+    else:
+        logger.info("Stale tag scan: disabled")
+    
     logger.info(f"Libvirt URI: {args.libvirt_uri}")
 
     # Determine tags to remove
@@ -255,7 +282,8 @@ Examples:
             boot_at_start=args.boot_at_start,
             boot_always=args.boot_always,
             broken_tag=broken_tag,
-            on_broken=on_broken
+            on_broken=on_broken,
+            stale_scan_interval=args.stale_scan_interval
         ))
         return 0
     except Exception as e:

@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`--log-prefix` now supports subdirectories** — Using `--log-prefix test/linux` creates log files under `logs/test/linux_<timestamp>_stdout.log` instead of replacing `/` with `-`. Parent directories are created automatically. Other special characters (spaces, dots, etc.) are still replaced with hyphens.
 
+### Added - VM Manager
+
+- **Periodic stale tag scan** — New `--stale-scan-interval` option (default: 300 seconds / 5 minutes) periodically scans all running VMs and removes stale `used` tags directly, without waiting for SSH. A tag is stale when the VM has a removable tag (e.g., `used`) in its inactive XML but is no longer actively in use by ansible-deployer (`in_use=false` or no metadata). This catches VMs where the deployer finished but the VM was never rebooted, so vm-manager never got a lifecycle event to trigger cleanup.
+  - New CLI option: `--stale-scan-interval SECONDS` (default: 300, 0 = disabled)
+  - New NixOS option: `services.vm-manager.staleScanInterval` (default: 300)
+  - Startup scan (`--check-existing`) also uses this logic: stale VMs get tags removed directly, actively-in-use VMs go through SSH monitoring
+
 ### Fixed - VM Manager
 
 #### Race Condition Fixes (Production Stress-Tested)
@@ -25,7 +32,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
 
 - **Fix: Cleanup race with ansible-deployer** — Added a 5-second delay before tag removal to ensure ansible-deployer's `reset_vm()` + `mark_available()` cleanup has fully completed. The non-blocking reboot means metadata is cleared before the VM finishes rebooting.
 
-- **Fix: Stale `used` tags on startup with `--check-existing`** — Added `_is_vm_actively_in_use()` check when processing existing running VMs at startup. VMs with a `used` tag but no active deployer session (no `in_use` metadata) are now correctly identified as stale and skipped, instead of starting infinite SSH retry loops.
+- **Fix: Stale `used` tags on startup with `--check-existing`** — Added `_is_vm_stale()` check when processing existing running VMs at startup. VMs with a `used` tag but no active deployer session (no `in_use` metadata) are now correctly identified as stale and have their tags removed directly, instead of starting infinite SSH retry loops.
 
 - **Fix: Orphaned monitor tasks for VMs without removable tags** — Added tag check in `_handle_vm_started()` to verify the VM actually has tags that need removing before starting a monitor. Previously, when `reset_vm()` rebooted a VM after the `used` tag was already removed, vm-manager would start a new infinite SSH retry loop. These orphaned monitors accumulated without bound.
 
@@ -33,7 +40,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
 
 - **Fix: Mid-run tag removal race condition** — Added `in_use` metadata check before removing the `used` tag. A playbook may reboot the VM mid-run (e.g., OS install), triggering vm-manager to detect the reboot and eventually SSH in. Without this check, vm-manager would remove the `used` tag while ansible-deployer was still actively orchestrating the VM, allowing another deployer to allocate it concurrently.
 
-#### New Features
+### Added - VM Manager (cont.)
 
 - **Broken VM tagging** — VMs that fail SSH after `--max-wait-time` (default: 30 minutes) are now tagged with a configurable `--broken-tag` (default: `broken`) instead of retrying forever. The `used` tag is intentionally kept so the VM won't be reallocated by ansible-deployer.
   - New CLI options: `--broken-tag TAG` (default: `broken`), `--no-broken-tag`
@@ -137,7 +144,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
   - Error handling patterns
   - Shared library architecture
 - **Testing Guide** (`docs/vm-manager/TESTING.md`, 740 lines):
-  - Test suite overview (41 unit tests)
+  - Test suite overview
   - Running tests (all tests, specific files, coverage)
   - Detailed test descriptions for each component
   - Manual testing procedures (8 step-by-step scenarios)
@@ -152,19 +159,19 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
   - Troubleshooting guide
 
 #### Test Suite
-- **294 comprehensive unit tests** covering all 7 race condition fixes, broken tag feature, auto-exclude behavior, and `--on-broken` script hook:
+- **323 comprehensive unit tests** covering all 7 race condition fixes, broken tag feature, auto-exclude behavior, `--on-broken` script hook, and stale tag scanning:
   - `tests/conftest.py`: Shared fixtures (`make_mock_domain()`, `make_mock_conn()`)
   - `tests/test_tag_filters.py`: 14 tests (`vm_matches_tags()` — required/exclude tags)
-  - `tests/test_vm_operations.py`: 33 tests (tag CRUD, IP resolution, state strings)
-  - `tests/test_metadata_manager.py`: 30 tests (MetadataManager get/set/claim/clear)
-  - `tests/test_allocate_vms.py`: 31 tests (VM allocation with auto-exclude broken)
-  - `tests/vm_manager/test_daemon.py`: 40 tests (event filtering, stale tags, startup, auto-exclude broken_tag)
-  - `tests/vm_manager/test_tag_cleaner.py`: Tag removal orchestration, race conditions #3/#6/#7, broken tagging, in_use check, on-broken script hook
-  - `tests/vm_manager/test_ssh_checker.py`: Uptime verification, string return values
-  - `tests/vm_manager/test_event_monitor.py`: Reboot callback registration
-  - `tests/vm_manager/test_vm_tracker.py`: Session management, debouncing
+  - `tests/test_vm_operations.py`: 38 tests (tag CRUD, IP resolution, state strings)
+  - `tests/test_metadata_manager.py`: 41 tests (MetadataManager get/set/claim/clear)
+  - `tests/test_allocate_vms.py`: 37 tests (VM allocation with auto-exclude broken)
+  - `tests/vm_manager/test_daemon.py`: 64 tests (event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag)
+  - `tests/vm_manager/test_tag_cleaner.py`: 42 tests (tag removal orchestration, race conditions #3/#6/#7, broken tagging, in_use check, on-broken script hook)
+  - `tests/vm_manager/test_ssh_checker.py`: 23 tests (uptime verification, string return values)
+  - `tests/vm_manager/test_event_monitor.py`: 15 tests (reboot callback registration)
+  - `tests/vm_manager/test_vm_tracker.py`: 7 tests (session management, debouncing)
 - **8 manual tests**: All scenarios validated with real VMs
-- **100% test pass rate**: 294/294 total tests
+- **100% test pass rate**: 323/323 total tests
 - **Mocked dependencies**: No real VMs or libvirt connection needed for unit tests
 
 #### Bug Fixes (During Development)

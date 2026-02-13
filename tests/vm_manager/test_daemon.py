@@ -4,14 +4,14 @@ Unit tests for VMManagerDaemon (main orchestration daemon).
 Covers:
 - _handle_vm_started: tag filtering + orphaned monitor prevention (Race #5)
 - _should_monitor_vm: tag matching delegation
-- _is_vm_actively_in_use: stale tag detection (Race #4)
-- _check_existing_vms: startup scan with stale-tag filtering
+- _is_vm_stale: stale tag detection via MetadataManager
+- _check_existing_vms: startup scan with stale-tag cleanup
+- _run_stale_tag_scan / _stale_tag_scan_loop: periodic stale tag scanning
 - _boot_matching_vms_once: booting shutdown VMs matching filters
 - Constructor and lifecycle basics
 """
 import asyncio
-from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock, patch, AsyncMock, MagicMock, call
+from unittest.mock import Mock, patch, AsyncMock
 
 import pytest
 
@@ -147,6 +147,14 @@ class TestVMManagerDaemonInit:
     def test_default_on_broken_is_none(self):
         d = _make_daemon()
         assert d.on_broken is None
+
+    def test_stores_stale_scan_interval(self):
+        d = _make_daemon(stale_scan_interval=120)
+        assert d.stale_scan_interval == 120
+
+    def test_default_stale_scan_interval(self):
+        d = _make_daemon()
+        assert d.stale_scan_interval == 300
 
 
 # ===================================================================
@@ -349,115 +357,57 @@ class TestHandleVMStarted:
 
 
 # ===================================================================
-# _is_vm_actively_in_use  (Race condition #4 coverage)
+# _is_vm_stale  (stale tag detection)
 # ===================================================================
 
-class TestIsVMActivelyInUse:
-    """Tests for stale-tag detection via domain metadata."""
+class TestIsVMStale:
+    """Tests for stale-tag detection via MetadataManager."""
 
-    def _make_metadata_xml(self, in_use=None, started_at=None):
-        """Build a fake metadata XML string."""
-        lines = ["<vm_info>"]
-        if in_use is not None:
-            lines.append(f"in_use: {'true' if in_use else 'false'}")
-        if started_at is not None:
-            lines.append(f"started_at: {started_at}")
-        lines.append("</vm_info>")
-        return "\n".join(lines)
-
-    # -- in_use=true -> actively in use --------------------------------
-
-    def test_in_use_true_returns_true(self):
-        import libvirt as lv
-
-        d = _make_daemon()
-        domain = _make_domain("active-vm")
-        domain.metadata.return_value = self._make_metadata_xml(in_use=True)
-
-        assert d._is_vm_actively_in_use(domain) is True
-
-    # -- started_at within 10 minutes -> actively in use ---------------
-
-    def test_recent_started_at_returns_true(self):
-        d = _make_daemon()
-        domain = _make_domain("recent-vm")
-        recent_time = datetime.now(timezone.utc) - timedelta(minutes=5)
-        domain.metadata.return_value = self._make_metadata_xml(
-            in_use=False,
-            started_at=recent_time.isoformat(),
-        )
-
-        assert d._is_vm_actively_in_use(domain) is True
-
-    # -- started_at older than 10 minutes + not in_use -> stale --------
-
-    def test_old_started_at_not_in_use_returns_false(self):
-        d = _make_daemon()
-        domain = _make_domain("old-vm")
-        old_time = datetime.now(timezone.utc) - timedelta(minutes=30)
-        domain.metadata.return_value = self._make_metadata_xml(
-            in_use=False,
-            started_at=old_time.isoformat(),
-        )
-
-        assert d._is_vm_actively_in_use(domain) is False
-
-    # -- No metadata at all (libvirtError) -> stale --------------------
-
-    def test_race4_no_metadata_returns_false(self):
-        """
-        Race condition #4 — stale tags on startup.
-
-        VM has the 'used' tag but no metadata. This means the tag is left
-        over from a previous run and should be treated as stale.
-        """
-        import libvirt as lv
-
+    @patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test", "used"])
+    def test_stale_when_not_in_use(self, _mock_tags):
+        """VM with 'used' tag and in_use=false should be stale."""
         d = _make_daemon()
         domain = _make_domain("stale-vm")
-        domain.metadata.side_effect = lv.libvirtError("no metadata")
 
-        assert d._is_vm_actively_in_use(domain) is False
+        with patch("vm_manager.daemon.MetadataManager") as MockMM:
+            MockMM.return_value.is_in_use.return_value = False
+            assert d._is_vm_stale(domain) is True
 
-    # -- Metadata present, in_use=true -> should process ---------------
-
-    def test_race4_in_use_true_metadata_returns_true(self):
-        """
-        Race condition #4 counterpart: VM has 'used' tag AND metadata
-        showing in_use=true. This VM should be processed.
-        """
+    @patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test", "used"])
+    def test_not_stale_when_in_use(self, _mock_tags):
+        """VM with 'used' tag and in_use=true should NOT be stale."""
         d = _make_daemon()
         domain = _make_domain("active-vm")
-        domain.metadata.return_value = self._make_metadata_xml(in_use=True)
 
-        assert d._is_vm_actively_in_use(domain) is True
+        with patch("vm_manager.daemon.MetadataManager") as MockMM:
+            MockMM.return_value.is_in_use.return_value = True
+            assert d._is_vm_stale(domain) is False
 
-    # -- Metadata present but in_use=false and no started_at -> stale --
-
-    def test_metadata_no_in_use_no_started_at_returns_false(self):
+    @patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test"])
+    def test_not_stale_when_no_removable_tags(self, _mock_tags):
+        """VM without any removable tags should NOT be stale."""
         d = _make_daemon()
-        domain = _make_domain("stale-vm2")
-        domain.metadata.return_value = self._make_metadata_xml(in_use=False)
+        domain = _make_domain("clean-vm")
 
-        assert d._is_vm_actively_in_use(domain) is False
+        assert d._is_vm_stale(domain) is False
 
-    # -- General exception -> assume not in use ------------------------
+    @patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test", "used"])
+    def test_stale_when_no_metadata(self, _mock_tags):
+        """VM with 'used' tag but no metadata (exception) should be stale."""
+        d = _make_daemon()
+        domain = _make_domain("no-meta-vm")
 
-    def test_general_exception_returns_false(self):
+        with patch("vm_manager.daemon.MetadataManager") as MockMM:
+            MockMM.return_value.is_in_use.side_effect = Exception("no metadata")
+            assert d._is_vm_stale(domain) is True
+
+    @patch("vm_manager.daemon.get_vm_tags", side_effect=Exception("libvirt error"))
+    def test_returns_false_on_exception(self, _mock_tags):
+        """General exception should return False (not stale)."""
         d = _make_daemon()
         domain = _make_domain("error-vm")
-        domain.metadata.side_effect = RuntimeError("unexpected")
 
-        assert d._is_vm_actively_in_use(domain) is False
-
-    # -- Empty metadata -> not in use ----------------------------------
-
-    def test_empty_metadata_returns_false(self):
-        d = _make_daemon()
-        domain = _make_domain("empty-meta-vm")
-        domain.metadata.return_value = "<vm_info>\n</vm_info>"
-
-        assert d._is_vm_actively_in_use(domain) is False
+        assert d._is_vm_stale(domain) is False
 
 
 # ===================================================================
@@ -465,35 +415,45 @@ class TestIsVMActivelyInUse:
 # ===================================================================
 
 class TestCheckExistingVMs:
-    """Tests for the startup scan of running VMs."""
+    """Tests for the startup scan of running VMs.
 
-    @pytest.mark.asyncio
-    async def test_processes_matching_active_vms(self):
-        """Matching + actively-in-use VMs should be forwarded to tag_cleaner."""
-        d = _make_daemon()
+    _check_existing_vms delegates to _is_vm_stale (tested separately):
+    - Stale VMs → remove_stale_tags() (direct removal)
+    - Non-stale VMs with removable tags → handle_vm_started() (SSH wait)
+    - VMs without removable tags → skipped
+    """
+
+    def _setup(self, **overrides):
+        d = _make_daemon(**overrides)
         d.conn = Mock()
         d.tag_cleaner = Mock()
         d.tag_cleaner.handle_vm_started = AsyncMock()
+        d.tag_cleaner.remove_stale_tags = AsyncMock()
+        return d
+
+    @pytest.mark.asyncio
+    async def test_actively_in_use_vms_get_ssh_monitoring(self):
+        """Matching VMs that are not stale and have removable tags go through SSH-wait."""
+        d = self._setup()
 
         domain_a = _make_domain("vm-a", "uuid-a")
         domain_b = _make_domain("vm-b", "uuid-b")
         d.conn.listAllDomains.return_value = [domain_a, domain_b]
 
         with patch.object(d, "_should_monitor_vm", return_value=True), \
-             patch.object(d, "_is_vm_actively_in_use", return_value=True):
+             patch.object(d, "_is_vm_stale", return_value=False), \
+             patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test", "used"]):
             await d._check_existing_vms()
 
         assert d.tag_cleaner.handle_vm_started.await_count == 2
         d.tag_cleaner.handle_vm_started.assert_any_await(domain_a)
         d.tag_cleaner.handle_vm_started.assert_any_await(domain_b)
+        d.tag_cleaner.remove_stale_tags.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_skips_non_matching_vms(self):
         """VMs not matching filters should be skipped entirely."""
-        d = _make_daemon()
-        d.conn = Mock()
-        d.tag_cleaner = Mock()
-        d.tag_cleaner.handle_vm_started = AsyncMock()
+        d = self._setup()
 
         domain = _make_domain("non-matching")
         d.conn.listAllDomains.return_value = [domain]
@@ -502,110 +462,99 @@ class TestCheckExistingVMs:
             await d._check_existing_vms()
 
         d.tag_cleaner.handle_vm_started.assert_not_called()
+        d.tag_cleaner.remove_stale_tags.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_race4_skips_stale_tags(self):
-        """
-        Race condition #4 — VMs that match filters but have stale 'used'
-        tags (no metadata / not actively in use) should be skipped.
-        """
-        d = _make_daemon()
-        d.conn = Mock()
-        d.tag_cleaner = Mock()
-        d.tag_cleaner.handle_vm_started = AsyncMock()
+    async def test_stale_vms_get_direct_tag_removal(self):
+        """Stale VMs get tags removed directly without SSH wait."""
+        d = self._setup()
 
         domain = _make_domain("stale-tag-vm")
         d.conn.listAllDomains.return_value = [domain]
 
         with patch.object(d, "_should_monitor_vm", return_value=True), \
-             patch.object(d, "_is_vm_actively_in_use", return_value=False):
+             patch.object(d, "_is_vm_stale", return_value=True):
             await d._check_existing_vms()
 
         d.tag_cleaner.handle_vm_started.assert_not_called()
+        d.tag_cleaner.remove_stale_tags.assert_awaited_once_with(domain)
 
     @pytest.mark.asyncio
-    async def test_race4_processes_active_vm_with_metadata(self):
-        """
-        Race condition #4 counterpart — VM matches filters and metadata
-        confirms it is actively in use. Should be processed.
-        """
-        d = _make_daemon()
-        d.conn = Mock()
-        d.tag_cleaner = Mock()
-        d.tag_cleaner.handle_vm_started = AsyncMock()
+    async def test_skips_vms_without_removable_tags(self):
+        """Non-stale matching VMs with NO removable tags should be skipped."""
+        d = self._setup()
 
-        domain = _make_domain("active-vm")
+        domain = _make_domain("clean-vm")
         d.conn.listAllDomains.return_value = [domain]
 
         with patch.object(d, "_should_monitor_vm", return_value=True), \
-             patch.object(d, "_is_vm_actively_in_use", return_value=True):
+             patch.object(d, "_is_vm_stale", return_value=False), \
+             patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test"]):
             await d._check_existing_vms()
 
-        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(domain)
+        d.tag_cleaner.handle_vm_started.assert_not_called()
+        d.tag_cleaner.remove_stale_tags.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_mixed_vms_only_active_matching_processed(self):
-        """Only VMs that both match filters AND are active should be processed."""
-        d = _make_daemon()
-        d.conn = Mock()
-        d.tag_cleaner = Mock()
-        d.tag_cleaner.handle_vm_started = AsyncMock()
+    async def test_mixed_vms_correct_routing(self):
+        """Active VMs get SSH monitoring, stale VMs get direct removal, non-matching skipped."""
+        d = self._setup()
 
-        active_matching = _make_domain("active-matching", "u1")
-        stale_matching = _make_domain("stale-matching", "u2")
+        active_vm = _make_domain("active-vm", "u1")
+        stale_vm = _make_domain("stale-vm", "u2")
         non_matching = _make_domain("non-matching", "u3")
+        clean_vm = _make_domain("clean-vm", "u4")
 
-        d.conn.listAllDomains.return_value = [
-            active_matching, stale_matching, non_matching,
-        ]
+        d.conn.listAllDomains.return_value = [active_vm, stale_vm, non_matching, clean_vm]
 
         def mock_should_monitor(domain):
             return domain.name() != "non-matching"
 
-        def mock_is_active(domain):
-            return domain.name() == "active-matching"
+        def mock_get_tags(domain):
+            if domain.name() == "clean-vm":
+                return ["linux-test"]  # no removable tags
+            return ["linux-test", "used"]
+
+        def mock_is_stale(domain):
+            return domain.name() == "stale-vm"
 
         with patch.object(d, "_should_monitor_vm", side_effect=mock_should_monitor), \
-             patch.object(d, "_is_vm_actively_in_use", side_effect=mock_is_active):
+             patch.object(d, "_is_vm_stale", side_effect=mock_is_stale), \
+             patch("vm_manager.daemon.get_vm_tags", side_effect=mock_get_tags):
             await d._check_existing_vms()
 
-        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(active_matching)
+        # active_vm → SSH monitoring
+        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(active_vm)
+        # stale_vm → direct removal
+        d.tag_cleaner.remove_stale_tags.assert_awaited_once_with(stale_vm)
 
     @pytest.mark.asyncio
     async def test_handles_empty_domain_list(self):
-        d = _make_daemon()
-        d.conn = Mock()
-        d.tag_cleaner = Mock()
-        d.tag_cleaner.handle_vm_started = AsyncMock()
+        d = self._setup()
         d.conn.listAllDomains.return_value = []
 
         await d._check_existing_vms()
 
         d.tag_cleaner.handle_vm_started.assert_not_called()
+        d.tag_cleaner.remove_stale_tags.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_continues_on_per_domain_exception(self):
         """An error on one domain should not prevent others from being checked."""
-        d = _make_daemon()
-        d.conn = Mock()
-        d.tag_cleaner = Mock()
-        d.tag_cleaner.handle_vm_started = AsyncMock()
+        d = self._setup()
 
         good_domain = _make_domain("good-vm", "u-good")
         bad_domain = _make_domain("bad-vm", "u-bad")
         d.conn.listAllDomains.return_value = [bad_domain, good_domain]
 
-        call_count = 0
-
         def mock_should_monitor(domain):
-            nonlocal call_count
-            call_count += 1
             if domain.name() == "bad-vm":
                 raise RuntimeError("libvirt error on bad-vm")
             return True
 
         with patch.object(d, "_should_monitor_vm", side_effect=mock_should_monitor), \
-             patch.object(d, "_is_vm_actively_in_use", return_value=True):
+             patch.object(d, "_is_vm_stale", return_value=False), \
+             patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test", "used"]):
             await d._check_existing_vms()
 
         # The good domain should still have been processed
@@ -806,6 +755,215 @@ class TestShutdown:
         # Should not raise
         await d.stop()
         assert d._running is False
+
+
+# ===================================================================
+# _run_stale_tag_scan / _stale_tag_scan_loop
+# ===================================================================
+
+class TestRunStaleScan:
+    """Tests for the periodic stale tag scan."""
+
+    def _setup(self, stale_scan_interval=300, **overrides):
+        d = _make_daemon(stale_scan_interval=stale_scan_interval, **overrides)
+        d.conn = Mock()
+        d.tag_cleaner = Mock()
+        d.tag_cleaner.remove_stale_tags = AsyncMock()
+        d.vm_tracker = Mock()
+        d.vm_tracker.is_monitoring = AsyncMock(return_value=False)
+        d._running = True
+        return d
+
+    @pytest.mark.asyncio
+    async def test_cleans_stale_vms(self):
+        """Stale VMs should have tags removed directly."""
+        d = self._setup()
+
+        domain = _make_domain("stale-vm", "uuid-stale")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=True), \
+             patch.object(d, "_is_vm_stale", return_value=True):
+            await d._run_stale_tag_scan()
+
+        d.tag_cleaner.remove_stale_tags.assert_awaited_once_with(domain)
+
+    @pytest.mark.asyncio
+    async def test_skips_non_matching_vms(self):
+        """VMs not matching tag filters should be skipped."""
+        d = self._setup()
+
+        domain = _make_domain("unrelated-vm", "uuid-unrel")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=False):
+            await d._run_stale_tag_scan()
+
+        d.tag_cleaner.remove_stale_tags.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_currently_monitored_vms(self):
+        """VMs already being monitored (SSH-wait in progress) should be skipped."""
+        d = self._setup()
+        d.vm_tracker.is_monitoring = AsyncMock(return_value=True)
+
+        domain = _make_domain("monitored-vm", "uuid-monitored")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=True), \
+             patch.object(d, "_is_vm_stale", return_value=True):
+            await d._run_stale_tag_scan()
+
+        d.tag_cleaner.remove_stale_tags.assert_not_called()
+        d.vm_tracker.is_monitoring.assert_awaited_once_with("uuid-monitored")
+
+    @pytest.mark.asyncio
+    async def test_skips_non_stale_vms(self):
+        """VMs that are not stale (actively in use) should be skipped."""
+        d = self._setup()
+
+        domain = _make_domain("active-vm", "uuid-active")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=True), \
+             patch.object(d, "_is_vm_stale", return_value=False):
+            await d._run_stale_tag_scan()
+
+        d.tag_cleaner.remove_stale_tags.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mixed_vms_only_stale_cleaned(self):
+        """Only stale, matching, non-monitored VMs should be cleaned."""
+        d = self._setup()
+
+        stale_vm = _make_domain("stale-vm", "uuid-stale")
+        active_vm = _make_domain("active-vm", "uuid-active")
+        monitored_vm = _make_domain("monitored-vm", "uuid-monitored")
+        non_matching = _make_domain("non-matching", "uuid-nonmatch")
+
+        d.conn.listAllDomains.return_value = [
+            stale_vm, active_vm, monitored_vm, non_matching
+        ]
+
+        def mock_should_monitor(domain):
+            return domain.name() != "non-matching"
+
+        def mock_is_stale(domain):
+            return domain.name() in ("stale-vm", "monitored-vm")
+
+        async def mock_is_monitoring(uuid):
+            return uuid == "uuid-monitored"
+
+        d.vm_tracker.is_monitoring = AsyncMock(side_effect=mock_is_monitoring)
+
+        with patch.object(d, "_should_monitor_vm", side_effect=mock_should_monitor), \
+             patch.object(d, "_is_vm_stale", side_effect=mock_is_stale):
+            await d._run_stale_tag_scan()
+
+        d.tag_cleaner.remove_stale_tags.assert_awaited_once_with(stale_vm)
+
+    @pytest.mark.asyncio
+    async def test_handles_listAllDomains_exception(self):
+        """Failure to list domains should not crash the scan."""
+        d = self._setup()
+        d.conn.listAllDomains.side_effect = Exception("connection lost")
+
+        # Should not raise
+        await d._run_stale_tag_scan()
+
+    @pytest.mark.asyncio
+    async def test_continues_on_per_domain_exception(self):
+        """An error on one domain should not prevent scanning others."""
+        d = self._setup()
+
+        bad_domain = _make_domain("bad-vm", "uuid-bad")
+        good_domain = _make_domain("good-vm", "uuid-good")
+        d.conn.listAllDomains.return_value = [bad_domain, good_domain]
+
+        def mock_should_monitor(domain):
+            if domain.name() == "bad-vm":
+                raise RuntimeError("libvirt error")
+            return True
+
+        with patch.object(d, "_should_monitor_vm", side_effect=mock_should_monitor), \
+             patch.object(d, "_is_vm_stale", return_value=True):
+            await d._run_stale_tag_scan()
+
+        d.tag_cleaner.remove_stale_tags.assert_awaited_once_with(good_domain)
+
+
+class TestStaleScanLoop:
+    """Tests for the stale scan loop lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_loop_runs_scan_after_interval(self):
+        """The loop should call _run_stale_tag_scan after sleeping."""
+        d = _make_daemon(stale_scan_interval=60)  # value doesn't matter, we mock sleep
+        d._running = True
+
+        scan_call_count = 0
+
+        async def mock_scan():
+            nonlocal scan_call_count
+            scan_call_count += 1
+            # Stop the loop after first scan
+            d._running = False
+
+        original_sleep = asyncio.sleep
+
+        async def mock_sleep(seconds):
+            # Only delay a tiny bit
+            await original_sleep(0.001)
+
+        with patch.object(d, "_run_stale_tag_scan", side_effect=mock_scan), \
+             patch("asyncio.sleep", side_effect=mock_sleep):
+            await d._stale_tag_scan_loop()
+
+        assert scan_call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_loop_handles_scan_exception(self):
+        """Exceptions in the scan should not stop the loop."""
+        d = _make_daemon(stale_scan_interval=60)
+        d._running = True
+
+        scan_call_count = 0
+
+        async def mock_scan():
+            nonlocal scan_call_count
+            scan_call_count += 1
+            if scan_call_count == 1:
+                raise RuntimeError("scan failed")
+            # Stop after second call
+            d._running = False
+
+        original_sleep = asyncio.sleep
+
+        async def mock_sleep(seconds):
+            await original_sleep(0.001)
+
+        with patch.object(d, "_run_stale_tag_scan", side_effect=mock_scan), \
+             patch("asyncio.sleep", side_effect=mock_sleep):
+            await d._stale_tag_scan_loop()
+
+        assert scan_call_count == 2  # First failed, second succeeded and stopped
+
+    @pytest.mark.asyncio
+    async def test_loop_stops_when_not_running(self):
+        """The loop should exit when _running is set to False."""
+        d = _make_daemon(stale_scan_interval=60)
+        d._running = False  # Not running from the start
+
+        with patch.object(d, "_run_stale_tag_scan", new_callable=AsyncMock) as mock_scan:
+            original_sleep = asyncio.sleep
+
+            async def mock_sleep(seconds):
+                await original_sleep(0.001)
+
+            with patch("asyncio.sleep", side_effect=mock_sleep):
+                await d._stale_tag_scan_loop()
+
+            mock_scan.assert_not_called()
 
 
 # ===================================================================
