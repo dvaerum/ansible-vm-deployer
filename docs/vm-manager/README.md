@@ -329,8 +329,8 @@ For detailed architecture documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 The project has comprehensive test coverage:
 
-- **334 total tests** (100% pass rate)
-  - Covers all 7 race condition fixes, broken VM handling, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), and stale tag scanning
+- **346 total tests** (100% pass rate)
+  - Covers all 7 race condition fixes, broken VM handling, auto-exclude behavior, `--on-broken` script hook (with retry/timeout/repair flow), CancelledError handling, and stale tag scanning
   - Tests cover: tag filters, VM operations, metadata management, VM allocation, daemon behavior, tag cleaning, SSH checking, event monitoring, and VM tracking
 
 ### Run Tests

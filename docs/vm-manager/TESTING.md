@@ -17,7 +17,7 @@ Comprehensive testing documentation for VM Manager, covering unit tests, manual 
 
 ### Test Coverage
 
-The project has **334 comprehensive unit tests** covering all core functionality, race condition fixes, broken VM handling, auto-exclude behavior, the `--on-broken` script hook (with retry/timeout), and stale tag scanning:
+The project has **346 comprehensive unit tests** covering all core functionality, race condition fixes, broken VM handling, auto-exclude behavior, the `--on-broken` script hook (with retry/timeout/repair flow), CancelledError handling, and stale tag scanning:
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
@@ -27,15 +27,15 @@ The project has **334 comprehensive unit tests** covering all core functionality
 | `tests/test_metadata_manager.py` | 41 | MetadataManager get/set/claim/clear |
 | `tests/test_allocate_vms.py` | 37 | VM allocation with auto-exclude broken |
 | `tests/vm_manager/test_daemon.py` | 70 | Event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag, on-broken timeout/retries/delay init |
-| `tests/vm_manager/test_tag_cleaner.py` | 47 | Race conditions #3/#6/#7, broken tag, in_use check, on-broken script, retry logic, configurable timeout, stale tag removal |
+| `tests/vm_manager/test_tag_cleaner.py` | 59 | Race conditions #3/#6/#7, broken tag, in_use check, on-broken script, retry logic, configurable timeout, return values, repair flow, CancelledError handling, stale tag removal |
 | `tests/vm_manager/test_ssh_checker.py` | 23 | Uptime verification, string return values |
 | `tests/vm_manager/test_event_monitor.py` | 15 | Reboot callback registration |
 | `tests/vm_manager/test_vm_tracker.py` | 7 | Session management, debouncing |
-| **Total** | **334** | All race conditions, broken VM handling, auto-exclude, on-broken (retry/timeout), stale scan |
+| **Total** | **346** | All race conditions, broken VM handling, auto-exclude, on-broken (retry/timeout/repair), CancelledError, stale scan |
 
 ### Test Types
 
-1. **Unit Tests** (334 tests)
+1. **Unit Tests** (346 tests)
    - Mocked dependencies (libvirt, paramiko)
    - Fast execution (<1 minute)
    - Run automatically in CI/CD
@@ -58,7 +58,7 @@ cd /path/to/ansible-vm-deployer
 sudo nix develop -c python3 -m pytest tests/ -v
 
 # Output:
-# 334 passed
+# 346 passed
 ```
 
 ### VM Manager Tests Only
@@ -234,7 +234,7 @@ def test_ssh_connect_no_auth_method(self):
 
 ---
 
-### test_tag_cleaner.py (47 tests)
+### test_tag_cleaner.py (59 tests)
 
 Tests workflow orchestration, IP retry logic, broken VM tagging, in_use checks, and on-broken script hook.
 
@@ -656,7 +656,7 @@ fi
 
 ### Test Performance
 
-- **Unit tests**: ~70 seconds for all 334 tests
+- **Unit tests**: ~43 seconds for all 346 tests
 - **Fast enough** for pre-commit hooks
 - **Parallelizable** for CI/CD
 

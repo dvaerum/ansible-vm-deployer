@@ -39,7 +39,7 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 **Purpose:** Monitor VMs and automatically manage tags based on SSH connectivity.
 
 **Maturity:** Newly released, production-ready  
-**Test Coverage:** 162 tests, 100% pass rate  
+**Test Coverage:** 174 tests, 100% pass rate  
 **Documentation:** Complete (2,400+ lines)
 
 **Key Features:**
@@ -72,9 +72,9 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 - ✅ Shared library (`vm_tools_common`)
 
 #### Testing
-- ✅ 162 VM Manager unit tests
+- ✅ 174 VM Manager unit tests
 - ✅ 8 manual tests with real VMs
-- ✅ 100% test pass rate (334/334 total)
+- ✅ 100% test pass rate (346/346 total)
 - ✅ Mocked dependencies for isolation
 
 #### Documentation
@@ -97,18 +97,18 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 | Component | Lines of Code | Tests | Documentation |
 |-----------|---------------|-------|---------------|
 | Ansible Deployer | ~2,000 | 172 | ~3,000 |
-| VM Manager | 1,466 | 162 | 2,404 |
+| VM Manager | 1,466 | 174 | 2,404 |
 | Shared Library | ~600 | Covered by both | - |
-| **Total** | **~4,066** | **334** | **5,404+** |
+| **Total** | **~4,066** | **346** | **5,404+** |
 
 ### Test Coverage
 
 ```
-Total Tests: 334/334 (100% pass rate)
+Total Tests: 346/346 (100% pass rate)
 ├── Shared/Deployer: 172 tests
-└── VM Manager: 162 tests
+└── VM Manager: 174 tests
     ├── test_daemon.py: 70 tests
-    ├── test_tag_cleaner.py: 47 tests
+    ├── test_tag_cleaner.py: 59 tests
     ├── test_ssh_checker.py: 23 tests
     ├── test_event_monitor.py: 15 tests
     └── test_vm_tracker.py: 7 tests
@@ -337,7 +337,7 @@ These tools work together to provide complete VM lifecycle management:
 
 - Added complete VM Manager tool (1,466 lines)
 - Created shared library (`vm_tools_common`)
-- Added 162 unit tests (100% pass rate)
+- Added 174 unit tests (100% pass rate)
 - Created comprehensive documentation (2,404 lines)
 - Added NixOS module with examples
 - Updated project structure and README
@@ -421,7 +421,7 @@ Dennis Vestergaard Værum (github@varum.dk)
 
 **Project Quality Metrics:**
 
-- ✅ 100% test pass rate (334/334 tests)
+- ✅ 100% test pass rate (346/346 tests)
 - ✅ Comprehensive documentation (5,400+ lines)
 - ✅ Production-ready code quality
 - ✅ Professional project structure

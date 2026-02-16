@@ -998,7 +998,7 @@ class TestOnBrokenScript:
                          side_effect=mock_ssh_timeout), \
              patch('vm_manager.tag_cleaner.add_vm_tag'), \
              patch.object(cleaner_with_script, '_run_on_broken_script',
-                         new_callable=AsyncMock) as mock_run_script:
+                         new_callable=AsyncMock, return_value=False) as mock_run_script:
 
             await cleaner_with_script._monitor_vm("test-uuid-123", "test-vm")
 
@@ -1279,3 +1279,372 @@ class TestOnBrokenScript:
             )
 
             assert mock_exec.call_count == 1
+
+
+class TestOnBrokenReturnValues:
+    """Tests for _run_on_broken_script returning bool."""
+
+    @pytest.fixture
+    def mock_conn(self):
+        return Mock()
+
+    @pytest.fixture
+    def ssh_checker(self):
+        config = SSHConfig(username="root", key_path="/test/key")
+        return SSHChecker(config, max_wait_time=1800)
+
+    @pytest.fixture
+    def vm_tracker(self):
+        return VMTracker()
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_disabled(self, mock_conn, ssh_checker, vm_tracker):
+        """When on_broken is None, returns False immediately."""
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], on_broken=None,
+        )
+        result = await cleaner._run_on_broken_script("vm", "uuid", "10.0.0.1")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_returns_true_on_success(self, mock_conn, ssh_checker, vm_tracker):
+        """Returns True when script exits 0."""
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+            on_broken="/path/to/handler.sh",
+        )
+        mock_conn.lookupByName.return_value = Mock()
+
+        with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
+             patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec:
+            mock_proc = AsyncMock()
+            mock_proc.communicate.return_value = (b"", b"")
+            mock_proc.returncode = 0
+            mock_exec.return_value = mock_proc
+
+            result = await cleaner._run_on_broken_script("vm", "uuid", "10.0.0.1")
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_retries_exhausted(self, mock_conn, ssh_checker, vm_tracker):
+        """Returns False when all retries fail."""
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+            on_broken="/path/to/handler.sh",
+            on_broken_retries=1, on_broken_retry_delay=0,
+        )
+        mock_conn.lookupByName.return_value = Mock()
+
+        with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
+             patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec:
+            mock_proc = AsyncMock()
+            mock_proc.communicate.return_value = (b"", b"")
+            mock_proc.returncode = 1
+            mock_exec.return_value = mock_proc
+
+            result = await cleaner._run_on_broken_script("vm", "uuid", "10.0.0.1")
+            assert result is False
+            assert mock_exec.call_count == 2  # 1 initial + 1 retry
+
+
+class TestRepairFlow:
+    """Tests for the post-success repair flow (Issue 1 fix)."""
+
+    @pytest.fixture
+    def mock_conn(self):
+        return Mock()
+
+    @pytest.fixture
+    def mock_domain(self):
+        domain = Mock()
+        domain.name.return_value = "test-vm"
+        domain.UUIDString.return_value = "test-uuid-123"
+        return domain
+
+    @pytest.fixture
+    def ssh_checker(self):
+        config = SSHConfig(username="root", key_path="/test/key")
+        return SSHChecker(config, max_wait_time=1800)
+
+    @pytest.fixture
+    def vm_tracker(self):
+        return VMTracker()
+
+    @pytest.mark.asyncio
+    async def test_tracker_freed_before_on_broken_script(
+        self, mock_conn, ssh_checker, vm_tracker, mock_domain
+    ):
+        """Tracker slot is freed BEFORE the on-broken script runs,
+        so if the script restarts the VM, new events aren't debounced."""
+        mock_conn.lookupByName.return_value = mock_domain
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+            on_broken="/path/to/handler.sh",
+            on_broken_retries=0,  # run once, don't retry
+        )
+
+        call_order = []
+
+        original_stop = vm_tracker.stop_monitoring
+
+        async def tracking_stop(uuid):
+            call_order.append("stop_monitoring")
+            await original_stop(uuid)
+
+        async def tracking_run_script(*args, **kwargs):
+            call_order.append("run_on_broken_script")
+            return False
+
+        async def mock_ssh_timeout(*args, **kwargs):
+            return "timeout"
+
+        with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="10.0.0.5"), \
+             patch.object(cleaner.ssh_checker, 'wait_for_ssh',
+                         side_effect=mock_ssh_timeout), \
+             patch('vm_manager.tag_cleaner.add_vm_tag'), \
+             patch.object(vm_tracker, 'stop_monitoring', side_effect=tracking_stop), \
+             patch.object(cleaner, '_run_on_broken_script',
+                         side_effect=tracking_run_script):
+
+            await cleaner._monitor_vm("test-uuid-123", "test-vm")
+
+        assert "stop_monitoring" in call_order
+        assert "run_on_broken_script" in call_order
+        stop_idx = call_order.index("stop_monitoring")
+        script_idx = call_order.index("run_on_broken_script")
+        assert stop_idx < script_idx, (
+            "stop_monitoring must be called before _run_on_broken_script"
+        )
+
+    @pytest.mark.asyncio
+    async def test_broken_tag_removed_after_successful_repair(
+        self, mock_conn, ssh_checker, vm_tracker, mock_domain
+    ):
+        """After on-broken script succeeds, the broken tag is removed."""
+        mock_conn.lookupByName.return_value = mock_domain
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+        )
+
+        with patch('vm_manager.tag_cleaner.remove_vm_tag') as mock_remove:
+            await cleaner._remove_broken_tag("test-vm", "test-uuid-123")
+
+            mock_remove.assert_called_once_with(
+                mock_conn, mock_domain, "broken"
+            )
+
+    @pytest.mark.asyncio
+    async def test_remove_broken_tag_noop_when_no_broken_tag(
+        self, mock_conn, ssh_checker, vm_tracker
+    ):
+        """_remove_broken_tag does nothing when broken_tag is None."""
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag=None,
+        )
+
+        with patch('vm_manager.tag_cleaner.remove_vm_tag') as mock_remove:
+            await cleaner._remove_broken_tag("test-vm", "uuid")
+            mock_remove.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handle_successful_repair_triggers_monitoring(
+        self, mock_conn, ssh_checker, vm_tracker, mock_domain
+    ):
+        """After repair, handle_vm_started is called to start fresh monitoring."""
+        mock_conn.lookupByName.return_value = mock_domain
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+        )
+
+        with patch('vm_manager.tag_cleaner.remove_vm_tag'), \
+             patch.object(cleaner, 'handle_vm_started',
+                         new_callable=AsyncMock) as mock_handle:
+
+            await cleaner._handle_successful_repair("test-vm", "test-uuid-123")
+
+            mock_handle.assert_awaited_once_with(mock_domain)
+
+    @pytest.mark.asyncio
+    async def test_no_repair_when_script_fails(
+        self, mock_conn, ssh_checker, vm_tracker, mock_domain
+    ):
+        """When on-broken script fails (retries exhausted), no repair actions taken."""
+        mock_conn.lookupByName.return_value = mock_domain
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+            on_broken="/path/to/handler.sh",
+            on_broken_retries=0,
+        )
+
+        async def mock_ssh_timeout(*args, **kwargs):
+            return "timeout"
+
+        with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="10.0.0.5"), \
+             patch.object(cleaner.ssh_checker, 'wait_for_ssh',
+                         side_effect=mock_ssh_timeout), \
+             patch('vm_manager.tag_cleaner.add_vm_tag'), \
+             patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
+             patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec, \
+             patch.object(cleaner, '_handle_successful_repair',
+                         new_callable=AsyncMock) as mock_repair:
+
+            mock_proc = AsyncMock()
+            mock_proc.communicate.return_value = (b"", b"")
+            mock_proc.returncode = 1
+            mock_exec.return_value = mock_proc
+
+            await cleaner._monitor_vm("test-uuid-123", "test-vm")
+
+            # Script failed → no repair
+            mock_repair.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_repair_triggered_when_script_succeeds(
+        self, mock_conn, ssh_checker, vm_tracker, mock_domain
+    ):
+        """When on-broken script succeeds, _handle_successful_repair IS called."""
+        mock_conn.lookupByName.return_value = mock_domain
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+            on_broken="/path/to/handler.sh",
+        )
+
+        async def mock_ssh_timeout(*args, **kwargs):
+            return "timeout"
+
+        with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="10.0.0.5"), \
+             patch.object(cleaner.ssh_checker, 'wait_for_ssh',
+                         side_effect=mock_ssh_timeout), \
+             patch('vm_manager.tag_cleaner.add_vm_tag'), \
+             patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
+             patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec, \
+             patch.object(cleaner, '_handle_successful_repair',
+                         new_callable=AsyncMock) as mock_repair:
+
+            mock_proc = AsyncMock()
+            mock_proc.communicate.return_value = (b"", b"")
+            mock_proc.returncode = 0
+            mock_exec.return_value = mock_proc
+
+            await cleaner._monitor_vm("test-uuid-123", "test-vm")
+
+            mock_repair.assert_awaited_once_with("test-vm", "test-uuid-123")
+
+    @pytest.mark.asyncio
+    async def test_tracker_not_double_freed_on_timeout_path(
+        self, mock_conn, ssh_checker, vm_tracker, mock_domain
+    ):
+        """On timeout path, stop_monitoring is called exactly once
+        (before script), not again in the finally block."""
+        mock_conn.lookupByName.return_value = mock_domain
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+        )
+
+        async def mock_ssh_timeout(*args, **kwargs):
+            return "timeout"
+
+        with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="10.0.0.5"), \
+             patch.object(cleaner.ssh_checker, 'wait_for_ssh',
+                         side_effect=mock_ssh_timeout), \
+             patch('vm_manager.tag_cleaner.add_vm_tag'), \
+             patch.object(vm_tracker, 'stop_monitoring',
+                         new_callable=AsyncMock) as mock_stop:
+
+            await cleaner._monitor_vm("test-uuid-123", "test-vm")
+
+            # Called once (before script), NOT again in finally
+            mock_stop.assert_called_once_with("test-uuid-123")
+
+
+class TestCancelledErrorHandling:
+    """Tests for CancelledError propagation and process cleanup."""
+
+    @pytest.fixture
+    def mock_conn(self):
+        return Mock()
+
+    @pytest.fixture
+    def ssh_checker(self):
+        config = SSHConfig(username="root", key_path="/test/key")
+        return SSHChecker(config, max_wait_time=1800)
+
+    @pytest.fixture
+    def vm_tracker(self):
+        return VMTracker()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_during_script_kills_process(
+        self, mock_conn, ssh_checker, vm_tracker
+    ):
+        """CancelledError during script execution kills the child process."""
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+            on_broken="/path/to/handler.sh",
+            on_broken_timeout=300,
+        )
+
+        import os
+        env = os.environ.copy()
+
+        with patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec:
+            mock_proc = AsyncMock()
+            # communicate() raises CancelledError (simulating task cancellation)
+            mock_proc.communicate.side_effect = asyncio.CancelledError()
+            mock_proc.returncode = None  # process still running
+            mock_proc.kill = Mock()
+            mock_proc.wait = AsyncMock()
+            mock_exec.return_value = mock_proc
+
+            with pytest.raises(asyncio.CancelledError):
+                await cleaner._execute_on_broken_script("test-vm", env)
+
+            # Process must be killed
+            mock_proc.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_during_retry_sleep_propagates(
+        self, mock_conn, ssh_checker, vm_tracker
+    ):
+        """CancelledError during retry sleep propagates correctly."""
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+            on_broken="/path/to/handler.sh",
+            on_broken_retry_delay=60,
+        )
+        mock_conn.lookupByName.return_value = Mock()
+
+        call_count = 0
+
+        async def mock_sleep(seconds):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 1 and seconds == 60:
+                # Simulate cancellation during retry delay
+                raise asyncio.CancelledError()
+
+        with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
+             patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec, \
+             patch('asyncio.sleep', side_effect=mock_sleep):
+
+            mock_proc = AsyncMock()
+            mock_proc.communicate.return_value = (b"", b"")
+            mock_proc.returncode = 1  # fail, triggering retry
+            mock_exec.return_value = mock_proc
+
+            with pytest.raises(asyncio.CancelledError):
+                await cleaner._run_on_broken_script(
+                    "test-vm", "test-uuid-123", "10.0.0.5"
+                )

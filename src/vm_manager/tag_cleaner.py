@@ -194,6 +194,7 @@ class TagCleaner:
             vm_uuid: VM UUID
             vm_name: VM name
         """
+        tracking_stopped = False
         try:
             logger.info(f"Starting monitoring for VM {vm_name} (uuid={vm_uuid})")
             
@@ -223,7 +224,18 @@ class TagCleaner:
                             "marking as broken"
                         )
                         await self._mark_vm_broken(vm_name, vm_uuid)
-                        await self._run_on_broken_script(vm_name, vm_uuid, None)
+                        # Free the tracker slot before running the on-broken
+                        # script, so if the script restarts the VM, a new
+                        # start event can create a fresh monitoring session.
+                        await self.vm_tracker.stop_monitoring(vm_uuid)
+                        tracking_stopped = True
+                        script_ok = await self._run_on_broken_script(
+                            vm_name, vm_uuid, None
+                        )
+                        if script_ok:
+                            await self._handle_successful_repair(
+                                vm_name, vm_uuid
+                            )
                         return
                 
                 # Wait before retrying IP resolution
@@ -254,7 +266,15 @@ class TagCleaner:
                     "VM may be broken"
                 )
                 await self._mark_vm_broken(vm_name, vm_uuid)
-                await self._run_on_broken_script(vm_name, vm_uuid, ip_address)
+                # Free the tracker slot before running the on-broken
+                # script (same rationale as the no-IP case above).
+                await self.vm_tracker.stop_monitoring(vm_uuid)
+                tracking_stopped = True
+                script_ok = await self._run_on_broken_script(
+                    vm_name, vm_uuid, ip_address
+                )
+                if script_ok:
+                    await self._handle_successful_repair(vm_name, vm_uuid)
                 return
             
             if ssh_result != "success":
@@ -302,8 +322,11 @@ class TagCleaner:
             )
         
         finally:
-            # Always stop tracking this VM when done
-            await self.vm_tracker.stop_monitoring(vm_uuid)
+            # Stop tracking this VM when done — unless we already freed
+            # the slot before running the on-broken script (to allow the
+            # script to restart the VM without debounce conflicts).
+            if not tracking_stopped:
+                await self.vm_tracker.stop_monitoring(vm_uuid)
     
 
     async def _is_vm_in_use(self, vm_name: str) -> bool:
@@ -339,6 +362,90 @@ class TagCleaner:
             logger.warning(f"Error checking in_use for {vm_name}: {e}")
             # On error, assume not in use to avoid blocking tag removal forever
             return False
+
+    async def _handle_successful_repair(
+        self,
+        vm_name: str,
+        vm_uuid: str
+    ) -> None:
+        """
+        Handle post-repair actions after an on-broken script succeeds.
+        
+        Removes the broken tag so the VM can be monitored again, then
+        triggers a fresh monitoring session. The on-broken script typically
+        restarts the VM (e.g., reset-vm-disks.sh), so by this point the VM
+        is running with fresh disks. Re-monitoring will wait for SSH and
+        then remove the 'used' tag.
+        
+        If re-monitoring cannot be triggered (e.g., VM no longer exists),
+        the stale tag scan will eventually clean up.
+        
+        Args:
+            vm_name: VM name
+            vm_uuid: VM UUID
+        """
+        await self._remove_broken_tag(vm_name, vm_uuid)
+        try:
+            loop = asyncio.get_running_loop()
+            domain = await loop.run_in_executor(
+                None, self.conn.lookupByName, vm_name
+            )
+            logger.info(
+                f"Triggering re-monitoring for repaired VM {vm_name}"
+            )
+            await self.handle_vm_started(domain)
+        except Exception as e:
+            logger.warning(
+                f"Could not trigger re-monitoring for {vm_name} after "
+                f"repair: {e}. The stale tag scan will eventually clean up."
+            )
+
+    async def _remove_broken_tag(
+        self,
+        vm_name: str,
+        vm_uuid: str
+    ) -> None:
+        """
+        Remove the broken tag from a VM after successful repair.
+        
+        Called after the on-broken script succeeds so the VM can be
+        re-monitored and eventually have its 'used' tag removed.
+        
+        Args:
+            vm_name: VM name
+            vm_uuid: VM UUID (for logging)
+        """
+        if not self.broken_tag:
+            return
+        
+        loop = asyncio.get_running_loop()
+        
+        try:
+            logger.info(
+                f"Removing broken tag '{self.broken_tag}' from VM "
+                f"{vm_name} after successful repair"
+            )
+            
+            def do_remove_broken_tag():
+                """Helper to look up domain and remove broken tag in executor thread"""
+                try:
+                    domain = self.conn.lookupByName(vm_name)
+                    remove_vm_tag(self.conn, domain, self.broken_tag)
+                except libvirt.libvirtError as e:
+                    raise Exception(f"Failed to remove broken tag: {e}")
+            
+            await loop.run_in_executor(None, do_remove_broken_tag)
+            
+            logger.info(
+                f"Successfully removed broken tag '{self.broken_tag}' "
+                f"from VM {vm_name}"
+            )
+        
+        except Exception as e:
+            logger.error(
+                f"Failed to remove broken tag from VM {vm_name}: {e}",
+                exc_info=True
+            )
 
     async def _mark_vm_broken(
         self,
@@ -397,7 +504,7 @@ class TagCleaner:
         vm_name: str,
         vm_uuid: str,
         ip_address: Optional[str] = None
-    ) -> None:
+    ) -> bool:
         """
         Run the external on-broken script with VM information as environment variables.
         
@@ -417,9 +524,13 @@ class TagCleaner:
             vm_name: VM name
             vm_uuid: VM UUID
             ip_address: Last known IP address (may be None)
+            
+        Returns:
+            True if script succeeded, False if no script configured or
+            retries exhausted
         """
         if not self.on_broken:
-            return
+            return False
         
         try:
             # Gather VM tags
@@ -461,7 +572,7 @@ class TagCleaner:
                 )
                 
                 if success:
-                    return
+                    return True
                 
                 # Check if we've exhausted retries
                 if self.on_broken_retries is not None and attempt >= self.on_broken_retries + 1:
@@ -469,7 +580,7 @@ class TagCleaner:
                         f"On-broken script for VM {vm_name} failed after "
                         f"{attempt} attempt(s), giving up"
                     )
-                    return
+                    return False
                 
                 # Wait before retrying
                 retry_desc = ""
@@ -494,6 +605,7 @@ class TagCleaner:
                 f"Failed to run on-broken script for VM {vm_name}: {e}",
                 exc_info=True
             )
+            return False
 
     async def _execute_on_broken_script(
         self,
@@ -510,6 +622,7 @@ class TagCleaner:
         Returns:
             True if script succeeded (exit code 0), False otherwise
         """
+        process = None
         try:
             process = await asyncio.create_subprocess_exec(
                 self.on_broken,
@@ -557,6 +670,17 @@ class TagCleaner:
             return True
         
         except asyncio.CancelledError:
+            # Kill the child process to avoid orphans when the daemon shuts down
+            if process is not None and process.returncode is None:
+                logger.info(
+                    f"Killing on-broken script for VM {vm_name} "
+                    "(task cancelled)"
+                )
+                try:
+                    process.kill()
+                    await process.wait()
+                except Exception:
+                    pass
             raise
         
         except Exception as e:

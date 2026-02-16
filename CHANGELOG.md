@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - VM Manager (Critical Review)
+
+- **Fix: Retry loop holds tracker slot** — When `_run_on_broken_script` ran inside `_monitor_vm`, it held the vm_tracker session. If the script restarted the VM, the new start event was debounced (tracker occupied) AND auto-excluded (broken tag). After script success, the VM was stranded with stale tags. Now `_monitor_vm` frees the tracker slot before running the on-broken script, and on successful repair, removes the broken tag and triggers fresh SSH monitoring via `handle_vm_started()`.
+- **Fix: CancelledError orphans child process** — `_execute_on_broken_script` now properly kills the subprocess when a `CancelledError` occurs during `communicate()`, preventing orphaned processes.
+- **Fix: `--on-broken-retry-delay 0` allows busy-wait spin** — CLI now validates that `--on-broken-retry-delay` must be at least 1 second (NixOS module already uses `ints.positive`).
+- **Fix: `--on-broken-timeout 0` causes infinite kill loop** — CLI now validates that `--on-broken-timeout` must be at least 1 second.
+- **Fix: `--on-broken-retries -1` accepted without validation** — CLI now validates that `--on-broken-retries` must be a non-negative integer.
+
 ### Changed - Ansible Deployer
 
 - **`--repeat N` for repeated playbook execution** — New `deploy` argument that runs the playbook N times on the same VM without reset between iterations. Stops on first failure. Each iteration gets its own log files (`_run-1`, `_run-2`, etc.). Default is 1 (backward compatible — no suffix added).
@@ -169,19 +177,19 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
   - Troubleshooting guide
 
 #### Test Suite
-- **334 comprehensive unit tests** covering all 7 race condition fixes, broken tag feature, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), and stale tag scanning:
+- **346 comprehensive unit tests** covering all 7 race condition fixes, broken tag feature, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), repair flow, CancelledError handling, and stale tag scanning:
   - `tests/conftest.py`: Shared fixtures (`make_mock_domain()`, `make_mock_conn()`)
   - `tests/test_tag_filters.py`: 14 tests (`vm_matches_tags()` — required/exclude tags)
   - `tests/test_vm_operations.py`: 38 tests (tag CRUD, IP resolution, state strings)
   - `tests/test_metadata_manager.py`: 41 tests (MetadataManager get/set/claim/clear)
   - `tests/test_allocate_vms.py`: 37 tests (VM allocation with auto-exclude broken)
   - `tests/vm_manager/test_daemon.py`: 70 tests (event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag, on-broken timeout/retries/delay init)
-  - `tests/vm_manager/test_tag_cleaner.py`: 47 tests (tag removal orchestration, race conditions #3/#6/#7, broken tagging, in_use check, on-broken script hook, retry logic, configurable timeout)
+  - `tests/vm_manager/test_tag_cleaner.py`: 59 tests (tag removal orchestration, race conditions #3/#6/#7, broken tagging, in_use check, on-broken script hook, retry logic, configurable timeout, return values, repair flow, CancelledError handling)
   - `tests/vm_manager/test_ssh_checker.py`: 23 tests (uptime verification, string return values)
   - `tests/vm_manager/test_event_monitor.py`: 15 tests (reboot callback registration)
   - `tests/vm_manager/test_vm_tracker.py`: 7 tests (session management, debouncing)
 - **8 manual tests**: All scenarios validated with real VMs
-- **100% test pass rate**: 334/334 total tests
+- **100% test pass rate**: 346/346 total tests
 - **Mocked dependencies**: No real VMs or libvirt connection needed for unit tests
 
 #### Bug Fixes (During Development)

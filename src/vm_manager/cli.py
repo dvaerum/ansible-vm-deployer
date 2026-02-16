@@ -214,6 +214,14 @@ Examples:
         if not os.access(args.on_broken, os.X_OK):
             parser.error(f"On-broken script is not executable: {args.on_broken}")
 
+    # Validate on-broken numeric options
+    if args.on_broken_timeout < 1:
+        parser.error("--on-broken-timeout must be at least 1 second")
+    if args.on_broken_retry_delay < 1:
+        parser.error("--on-broken-retry-delay must be at least 1 second")
+    if args.on_broken_retries is not None and args.on_broken_retries < 0:
+        parser.error("--on-broken-retries must be a non-negative integer (0 = no retries)")
+
     # Setup logging
     log_level = getattr(logging, args.log_level.upper())
     logging.basicConfig(
