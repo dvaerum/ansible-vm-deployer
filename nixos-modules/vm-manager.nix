@@ -37,6 +37,9 @@ let
       
       # On-broken handler script
       ++ optional (cfg.onBroken != null) "--on-broken ${escapeShellArg cfg.onBroken}"
+      ++ optional (cfg.onBroken != null) "--on-broken-timeout ${toString cfg.onBrokenTimeout}"
+      ++ optional (cfg.onBroken != null && cfg.onBrokenRetries != null) "--on-broken-retries ${toString cfg.onBrokenRetries}"
+      ++ optional (cfg.onBroken != null) "--on-broken-retry-delay ${toString cfg.onBrokenRetryDelay}"
       
       # Startup behavior
       ++ optional cfg.checkExisting "--check-existing"
@@ -170,9 +173,38 @@ in {
         Path to an external script/program to run when a VM is marked broken.
         The script receives VM information via environment variables:
         VM_NAME, VM_UUID, VM_IP, VM_TAGS, VM_BROKEN_TAG, VM_WAIT_TIME, LIBVIRT_URI.
-        The script is called asynchronously and non-zero exit codes are logged
-        as warnings but do not affect vm-manager operation.
-        Set to null to disable (default).
+        The script is retried on failure according to onBrokenRetries and
+        onBrokenRetryDelay. Set to null to disable (default).
+      '';
+    };
+
+    onBrokenTimeout = mkOption {
+      type = types.ints.positive;
+      default = 300;
+      example = 600;
+      description = ''
+        Maximum time in seconds to wait for the on-broken script to finish
+        before killing it. Default: 300 (5 minutes).
+      '';
+    };
+
+    onBrokenRetries = mkOption {
+      type = types.nullOr types.ints.unsigned;
+      default = null;
+      example = 5;
+      description = ''
+        Maximum number of times to retry the on-broken script if it fails
+        (non-zero exit or timeout). Set to null for unlimited retries (default).
+        Set to 0 for no retries (run once only).
+      '';
+    };
+
+    onBrokenRetryDelay = mkOption {
+      type = types.ints.positive;
+      default = 60;
+      example = 120;
+      description = ''
+        Delay in seconds between on-broken script retry attempts. Default: 60.
       '';
     };
 

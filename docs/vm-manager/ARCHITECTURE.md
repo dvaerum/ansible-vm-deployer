@@ -288,7 +288,7 @@ class SSHConfig:
 - **Solution**: After `--max-wait-time` (default: 30 minutes), add a `--broken-tag` (default: `broken`) to the VM
 - **Behavior**: The `used` tag is intentionally kept so the VM won't be reallocated. The `broken` tag provides visibility for external monitoring.
 - **Auto-exclude**: The daemon auto-appends `broken_tag` to `exclude_tags`, so broken VMs won't be re-monitored on the next reboot or `--check-existing` scan. The ansible-deployer also auto-excludes `broken` VMs from allocation.
-- **On-broken hook**: If `--on-broken /path/to/script.sh` is configured, the script is called asynchronously after tagging. It receives `VM_NAME`, `VM_UUID`, `VM_IP`, `VM_TAGS`, `VM_BROKEN_TAG`, `VM_WAIT_TIME`, and `LIBVIRT_URI` as environment variables. The script has a 60-second timeout and non-zero exits are logged as warnings.
+- **On-broken hook**: If `--on-broken /path/to/script.sh` is configured, the script is called asynchronously after tagging. It receives `VM_NAME`, `VM_UUID`, `VM_IP`, `VM_TAGS`, `VM_BROKEN_TAG`, `VM_WAIT_TIME`, and `LIBVIRT_URI` as environment variables. The script timeout is configurable via `--on-broken-timeout` (default: 300 seconds). The script retries on failure with configurable retry count (`--on-broken-retries`, default: unlimited) and delay (`--on-broken-retry-delay`, default: 60 seconds). Non-zero exits are logged as warnings.
 
 **Dependencies**: SSHChecker, VMTracker, MetadataManager, vm_tools_common
 
@@ -540,7 +540,8 @@ Original SSH check continues uninterrupted
 - Minimal code: ~30 lines in `tag_cleaner.py`, no new dependencies
 - Standard interface: environment variables are universally accessible from any language
 - Safe defaults: script failures don't affect vm-manager operation
-- 60-second timeout prevents hung scripts from blocking the daemon
+- Configurable timeout (default 300 seconds) prevents hung scripts from blocking the daemon
+- Automatic retry with configurable count and delay handles transient failures
 
 ---
 

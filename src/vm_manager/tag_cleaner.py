@@ -38,6 +38,9 @@ class TagCleaner:
         tags_to_remove: List[str],
         broken_tag: Optional[str] = None,
         on_broken: Optional[str] = None,
+        on_broken_timeout: int = 300,
+        on_broken_retries: Optional[int] = None,
+        on_broken_retry_delay: int = 60,
         libvirt_uri: str = "qemu:///system"
     ):
         """
@@ -50,6 +53,9 @@ class TagCleaner:
             tags_to_remove: List of tags to remove after SSH succeeds
             broken_tag: Tag to add when SSH times out (None = don't tag)
             on_broken: Path to external script to run when a VM is marked broken (None = disabled)
+            on_broken_timeout: Seconds before killing the on-broken script (default: 300)
+            on_broken_retries: Max retries for on-broken script (None = unlimited)
+            on_broken_retry_delay: Seconds between on-broken retries (default: 60)
             libvirt_uri: Libvirt connection URI (passed to on_broken script as env var)
         """
         self.conn = conn
@@ -58,6 +64,9 @@ class TagCleaner:
         self.tags_to_remove = tags_to_remove
         self.broken_tag = broken_tag
         self.on_broken = on_broken
+        self.on_broken_timeout = on_broken_timeout
+        self.on_broken_retries = on_broken_retries
+        self.on_broken_retry_delay = on_broken_retry_delay
         self.libvirt_uri = libvirt_uri
     
     async def handle_vm_started(self, domain: libvirt.virDomain) -> None:
@@ -392,8 +401,8 @@ class TagCleaner:
         """
         Run the external on-broken script with VM information as environment variables.
         
-        The script is called asynchronously (fire-and-forget). Non-zero exit codes
-        are logged as warnings but do not affect vm-manager operation.
+        Retries on failure (non-zero exit or timeout) according to on_broken_retries
+        and on_broken_retry_delay. If on_broken_retries is None, retries forever.
         
         Environment variables passed to the script:
             VM_NAME: VM name
@@ -437,11 +446,71 @@ class TagCleaner:
                 "LIBVIRT_URI": self.libvirt_uri,
             })
             
+            attempt = 0
+            while True:
+                attempt += 1
+                retry_label = f" (attempt {attempt})" if attempt > 1 else ""
+                
+                logger.info(
+                    f"Running on-broken script '{self.on_broken}' "
+                    f"for VM {vm_name}{retry_label}"
+                )
+                
+                success = await self._execute_on_broken_script(
+                    vm_name, env
+                )
+                
+                if success:
+                    return
+                
+                # Check if we've exhausted retries
+                if self.on_broken_retries is not None and attempt >= self.on_broken_retries + 1:
+                    logger.error(
+                        f"On-broken script for VM {vm_name} failed after "
+                        f"{attempt} attempt(s), giving up"
+                    )
+                    return
+                
+                # Wait before retrying
+                retry_desc = ""
+                if self.on_broken_retries is not None:
+                    remaining = self.on_broken_retries + 1 - attempt
+                    retry_desc = f" ({remaining} retries remaining)"
+                
+                logger.info(
+                    f"Retrying on-broken script for VM {vm_name} "
+                    f"in {self.on_broken_retry_delay}s{retry_desc}"
+                )
+                await asyncio.sleep(self.on_broken_retry_delay)
+        
+        except asyncio.CancelledError:
             logger.info(
-                f"Running on-broken script '{self.on_broken}' for VM {vm_name}"
+                f"On-broken script retry loop cancelled for VM {vm_name}"
             )
+            raise
+        
+        except Exception as e:
+            logger.error(
+                f"Failed to run on-broken script for VM {vm_name}: {e}",
+                exc_info=True
+            )
+
+    async def _execute_on_broken_script(
+        self,
+        vm_name: str,
+        env: dict
+    ) -> bool:
+        """
+        Execute the on-broken script once.
+        
+        Args:
+            vm_name: VM name (for logging)
+            env: Environment variables for the script
             
-            # Run the script asynchronously with a 60-second timeout
+        Returns:
+            True if script succeeded (exit code 0), False otherwise
+        """
+        try:
             process = await asyncio.create_subprocess_exec(
                 self.on_broken,
                 stdout=asyncio.subprocess.PIPE,
@@ -452,16 +521,17 @@ class TagCleaner:
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(),
-                    timeout=60
+                    timeout=self.on_broken_timeout
                 )
             except asyncio.TimeoutError:
                 logger.warning(
                     f"On-broken script '{self.on_broken}' for VM {vm_name} "
-                    "timed out after 60 seconds, killing process"
+                    f"timed out after {self.on_broken_timeout} seconds, "
+                    "killing process"
                 )
                 process.kill()
                 await process.wait()
-                return
+                return False
             
             if stdout:
                 logger.debug(
@@ -479,16 +549,22 @@ class TagCleaner:
                     f"On-broken script '{self.on_broken}' for VM {vm_name} "
                     f"exited with code {process.returncode}"
                 )
-            else:
-                logger.info(
-                    f"On-broken script completed successfully for VM {vm_name}"
-                )
+                return False
+            
+            logger.info(
+                f"On-broken script completed successfully for VM {vm_name}"
+            )
+            return True
+        
+        except asyncio.CancelledError:
+            raise
         
         except Exception as e:
             logger.error(
-                f"Failed to run on-broken script for VM {vm_name}: {e}",
+                f"Failed to execute on-broken script for VM {vm_name}: {e}",
                 exc_info=True
             )
+            return False
 
     async def remove_stale_tags(self, domain: libvirt.virDomain) -> None:
         """

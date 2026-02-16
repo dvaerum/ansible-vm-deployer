@@ -56,7 +56,15 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
   - New CLI option: `--on-broken /path/to/handler.sh` (must be an executable file)
   - New NixOS option: `services.vm-manager.onBroken` (type: `nullOr path`, default: `null`)
   - Environment variables passed to script: `VM_NAME`, `VM_UUID`, `VM_IP`, `VM_TAGS`, `VM_BROKEN_TAG`, `VM_WAIT_TIME`, `LIBVIRT_URI`
-  - Script runs asynchronously with a 60-second timeout; non-zero exit codes are logged as warnings but don't affect vm-manager operation
+  - Script timeout is now configurable via `--on-broken-timeout` (default: 300 seconds, was hardcoded 60 seconds)
+  - Script now retries on failure (non-zero exit or timeout) with configurable retry count and delay
+  - New CLI options:
+    - `--on-broken-timeout SECONDS` (default: 300) — max time before killing script
+    - `--on-broken-retries COUNT` (default: unlimited) — max retry attempts (omit for infinite)
+    - `--on-broken-retry-delay SECONDS` (default: 60) — delay between retries
+  - New NixOS options: `onBrokenTimeout` (default: 300), `onBrokenRetries` (default: null = unlimited), `onBrokenRetryDelay` (default: 60)
+
+- **`scripts/reset-vm-disks.sh`** — New on-broken script for resetting VM disks. Handles both file-backed disks (`<source file=.../>`) and pool-backed volumes (`<source pool=... volume=.../>`). Parses VM inactive XML directly, gracefully shuts down the VM, recreates disks at their original size, and restarts the VM.
 
 - **Default SSH timeout** — `--max-wait-time` now defaults to 1800 seconds (30 minutes) instead of infinite. This prevents unbounded resource accumulation from monitors that can never succeed.
   - NixOS option `services.vm-manager.maxWaitTime` default changed from `null` to `1800`
@@ -161,19 +169,19 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
   - Troubleshooting guide
 
 #### Test Suite
-- **323 comprehensive unit tests** covering all 7 race condition fixes, broken tag feature, auto-exclude behavior, `--on-broken` script hook, and stale tag scanning:
+- **334 comprehensive unit tests** covering all 7 race condition fixes, broken tag feature, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), and stale tag scanning:
   - `tests/conftest.py`: Shared fixtures (`make_mock_domain()`, `make_mock_conn()`)
   - `tests/test_tag_filters.py`: 14 tests (`vm_matches_tags()` — required/exclude tags)
   - `tests/test_vm_operations.py`: 38 tests (tag CRUD, IP resolution, state strings)
   - `tests/test_metadata_manager.py`: 41 tests (MetadataManager get/set/claim/clear)
   - `tests/test_allocate_vms.py`: 37 tests (VM allocation with auto-exclude broken)
-  - `tests/vm_manager/test_daemon.py`: 64 tests (event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag)
-  - `tests/vm_manager/test_tag_cleaner.py`: 42 tests (tag removal orchestration, race conditions #3/#6/#7, broken tagging, in_use check, on-broken script hook)
+  - `tests/vm_manager/test_daemon.py`: 70 tests (event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag, on-broken timeout/retries/delay init)
+  - `tests/vm_manager/test_tag_cleaner.py`: 47 tests (tag removal orchestration, race conditions #3/#6/#7, broken tagging, in_use check, on-broken script hook, retry logic, configurable timeout)
   - `tests/vm_manager/test_ssh_checker.py`: 23 tests (uptime verification, string return values)
   - `tests/vm_manager/test_event_monitor.py`: 15 tests (reboot callback registration)
   - `tests/vm_manager/test_vm_tracker.py`: 7 tests (session management, debouncing)
 - **8 manual tests**: All scenarios validated with real VMs
-- **100% test pass rate**: 323/323 total tests
+- **100% test pass rate**: 334/334 total tests
 - **Mocked dependencies**: No real VMs or libvirt connection needed for unit tests
 
 #### Bug Fixes (During Development)

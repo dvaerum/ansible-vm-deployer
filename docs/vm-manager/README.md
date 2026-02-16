@@ -166,6 +166,9 @@ sudo nix develop -c python3 -m vm_manager.cli \
 | `--broken-tag TAG` | broken | Tag to add when SSH times out after max-wait-time |
 | `--no-broken-tag` | | Don't add a tag on timeout (just stop monitoring) |
 | `--on-broken PATH` | | External script to run when a VM is marked broken |
+| `--on-broken-timeout SECONDS` | 300 | Max time before killing the on-broken script |
+| `--on-broken-retries COUNT` | unlimited | Max retry attempts (omit for infinite retries) |
+| `--on-broken-retry-delay SECONDS` | 60 | Delay between on-broken script retries |
 
 When a VM fails SSH checks for `--max-wait-time` seconds, it is tagged with `--broken-tag` (default: `broken`). The `used` tag is intentionally kept so the VM won't be reallocated by ansible-deployer.
 
@@ -183,7 +186,7 @@ When a VM fails SSH checks for `--max-wait-time` seconds, it is tagged with `--b
 | `VM_WAIT_TIME` | `1800` | Max wait time in seconds |
 | `LIBVIRT_URI` | `qemu:///system` | Libvirt connection URI |
 
-The script has a 60-second timeout. Non-zero exit codes are logged as warnings but don't affect vm-manager operation.
+The script timeout is configurable via `--on-broken-timeout` (default: 300 seconds). The script retries on failure with configurable retry count (`--on-broken-retries`, default: unlimited) and delay (`--on-broken-retry-delay`, default: 60 seconds). Non-zero exit codes are logged as warnings but don't affect vm-manager operation.
 
 ### Stale Tag Scanning
 
@@ -326,8 +329,8 @@ For detailed architecture documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 The project has comprehensive test coverage:
 
-- **323 total tests** (100% pass rate)
-  - Covers all 7 race condition fixes, broken VM handling, auto-exclude behavior, `--on-broken` script hook, and stale tag scanning
+- **334 total tests** (100% pass rate)
+  - Covers all 7 race condition fixes, broken VM handling, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), and stale tag scanning
   - Tests cover: tag filters, VM operations, metadata management, VM allocation, daemon behavior, tag cleaning, SSH checking, event monitoring, and VM tracking
 
 ### Run Tests

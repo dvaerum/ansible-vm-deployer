@@ -148,6 +148,30 @@ class TestVMManagerDaemonInit:
         d = _make_daemon()
         assert d.on_broken is None
 
+    def test_stores_on_broken_timeout(self):
+        d = _make_daemon(on_broken_timeout=600)
+        assert d.on_broken_timeout == 600
+
+    def test_default_on_broken_timeout(self):
+        d = _make_daemon()
+        assert d.on_broken_timeout == 300
+
+    def test_stores_on_broken_retries(self):
+        d = _make_daemon(on_broken_retries=5)
+        assert d.on_broken_retries == 5
+
+    def test_default_on_broken_retries_is_none(self):
+        d = _make_daemon()
+        assert d.on_broken_retries is None
+
+    def test_stores_on_broken_retry_delay(self):
+        d = _make_daemon(on_broken_retry_delay=120)
+        assert d.on_broken_retry_delay == 120
+
+    def test_default_on_broken_retry_delay(self):
+        d = _make_daemon()
+        assert d.on_broken_retry_delay == 60
+
     def test_stores_stale_scan_interval(self):
         d = _make_daemon(stale_scan_interval=120)
         assert d.stale_scan_interval == 120

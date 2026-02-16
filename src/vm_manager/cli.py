@@ -132,6 +132,29 @@ Examples:
              "VM information is passed via environment variables: "
              "VM_NAME, VM_UUID, VM_IP, VM_TAGS, VM_BROKEN_TAG, VM_WAIT_TIME, LIBVIRT_URI"
     )
+    parser.add_argument(
+        "--on-broken-timeout",
+        type=int,
+        default=300,
+        metavar="SECONDS",
+        help="Maximum time to wait for the on-broken script to finish (default: 300 = 5 minutes). "
+             "The script is killed if it exceeds this timeout."
+    )
+    parser.add_argument(
+        "--on-broken-retries",
+        type=int,
+        default=None,
+        metavar="COUNT",
+        help="Maximum number of times to retry the on-broken script if it fails "
+             "(non-zero exit or timeout). Default: unlimited (keep retrying forever)."
+    )
+    parser.add_argument(
+        "--on-broken-retry-delay",
+        type=int,
+        default=60,
+        metavar="SECONDS",
+        help="Delay in seconds between on-broken script retry attempts (default: 60)."
+    )
 
     # Startup behavior
     parser.add_argument(
@@ -223,11 +246,17 @@ Examples:
     else:
         logger.info("Broken tag: disabled")
     
-    # Determine on-broken script
+    # Determine on-broken script and its options
     on_broken: Optional[str] = None
     if args.on_broken:
         on_broken = str(args.on_broken)
         logger.info(f"On-broken script: {on_broken}")
+        logger.info(f"On-broken timeout: {args.on_broken_timeout}s")
+        if args.on_broken_retries is not None:
+            logger.info(f"On-broken retries: {args.on_broken_retries}")
+        else:
+            logger.info("On-broken retries: unlimited")
+        logger.info(f"On-broken retry delay: {args.on_broken_retry_delay}s")
     
     if args.stale_scan_interval > 0:
         interval = args.stale_scan_interval
@@ -283,6 +312,9 @@ Examples:
             boot_always=args.boot_always,
             broken_tag=broken_tag,
             on_broken=on_broken,
+            on_broken_timeout=args.on_broken_timeout,
+            on_broken_retries=args.on_broken_retries,
+            on_broken_retry_delay=args.on_broken_retry_delay,
             stale_scan_interval=args.stale_scan_interval
         ))
         return 0

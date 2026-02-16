@@ -53,6 +53,9 @@ class VMManagerDaemon:
         boot_always: bool,
         broken_tag: Optional[str] = None,
         on_broken: Optional[str] = None,
+        on_broken_timeout: int = 300,
+        on_broken_retries: Optional[int] = None,
+        on_broken_retry_delay: int = 60,
         stale_scan_interval: int = 300
     ):
         """
@@ -71,6 +74,9 @@ class VMManagerDaemon:
             boot_always: Continuously boot matching shutdown VMs
             broken_tag: Tag to add when SSH times out (None = don't tag)
             on_broken: Path to external script to run when a VM is marked broken (None = disabled)
+            on_broken_timeout: Seconds before killing the on-broken script (default: 300)
+            on_broken_retries: Max retries for on-broken script (None = unlimited)
+            on_broken_retry_delay: Seconds between on-broken retries (default: 60)
             stale_scan_interval: Seconds between stale tag scans (0 = disabled)
         """
         self.libvirt_uri = libvirt_uri
@@ -85,6 +91,9 @@ class VMManagerDaemon:
         self.boot_always = boot_always
         self.broken_tag = broken_tag
         self.on_broken = on_broken
+        self.on_broken_timeout = on_broken_timeout
+        self.on_broken_retries = on_broken_retries
+        self.on_broken_retry_delay = on_broken_retry_delay
         self.stale_scan_interval = stale_scan_interval
         
         # Auto-exclude broken VMs from monitoring/booting.
@@ -148,6 +157,9 @@ class VMManagerDaemon:
                 tags_to_remove=self.tags_to_remove,
                 broken_tag=self.broken_tag,
                 on_broken=self.on_broken,
+                on_broken_timeout=self.on_broken_timeout,
+                on_broken_retries=self.on_broken_retries,
+                on_broken_retry_delay=self.on_broken_retry_delay,
                 libvirt_uri=self.libvirt_uri
             )
             
@@ -568,6 +580,9 @@ async def run_daemon(
     boot_always: bool,
     broken_tag: Optional[str] = None,
     on_broken: Optional[str] = None,
+    on_broken_timeout: int = 300,
+    on_broken_retries: Optional[int] = None,
+    on_broken_retry_delay: int = 60,
     stale_scan_interval: int = 300
 ) -> None:
     """
@@ -588,6 +603,9 @@ async def run_daemon(
         boot_always: Continuously boot matching shutdown VMs
         broken_tag: Tag to add when SSH times out (None = don't tag)
         on_broken: Path to external script to run when a VM is marked broken (None = disabled)
+        on_broken_timeout: Seconds before killing the on-broken script (default: 300)
+        on_broken_retries: Max retries for on-broken script (None = unlimited)
+        on_broken_retry_delay: Seconds between on-broken retries (default: 60)
         stale_scan_interval: Seconds between stale tag scans (0 = disabled)
     """
     daemon = VMManagerDaemon(
@@ -603,6 +621,9 @@ async def run_daemon(
         boot_always=boot_always,
         broken_tag=broken_tag,
         on_broken=on_broken,
+        on_broken_timeout=on_broken_timeout,
+        on_broken_retries=on_broken_retries,
+        on_broken_retry_delay=on_broken_retry_delay,
         stale_scan_interval=stale_scan_interval
     )
     

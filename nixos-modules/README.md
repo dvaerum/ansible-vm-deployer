@@ -120,7 +120,25 @@ sudo nixos-rebuild switch --flake .#your-hostname
 - **Type**: `null or path`
 - **Default**: `null`
 - **Example**: `/path/to/handler.sh`
-- **Description**: Path to an external script to run when a VM is marked broken. The script receives VM information via environment variables: `VM_NAME`, `VM_UUID`, `VM_IP`, `VM_TAGS`, `VM_BROKEN_TAG`, `VM_WAIT_TIME`, `LIBVIRT_URI`. The script runs asynchronously with a 60-second timeout. Non-zero exit codes are logged as warnings but don't affect vm-manager operation.
+- **Description**: Path to an external script to run when a VM is marked broken. The script receives VM information via environment variables: `VM_NAME`, `VM_UUID`, `VM_IP`, `VM_TAGS`, `VM_BROKEN_TAG`, `VM_WAIT_TIME`, `LIBVIRT_URI`. The script timeout is configurable via `onBrokenTimeout` (default: 300 seconds). The script retries on failure with configurable retry count and delay. Non-zero exit codes are logged as warnings but don't affect vm-manager operation.
+
+#### `services.vm-manager.onBrokenTimeout`
+- **Type**: `positive integer`
+- **Default**: `300`
+- **Example**: `600`
+- **Description**: Maximum time in seconds before killing the on-broken script. Only used when `onBroken` is set.
+
+#### `services.vm-manager.onBrokenRetries`
+- **Type**: `null or unsigned integer`
+- **Default**: `null` (unlimited retries)
+- **Example**: `3`
+- **Description**: Maximum number of retry attempts for the on-broken script. Set to `null` for unlimited retries, `0` to run the script only once with no retries. Only used when `onBroken` is set.
+
+#### `services.vm-manager.onBrokenRetryDelay`
+- **Type**: `positive integer`
+- **Default**: `60`
+- **Example**: `120`
+- **Description**: Delay in seconds between on-broken script retry attempts. Only used when `onBroken` is set.
 
 #### `services.vm-manager.staleScanInterval`
 - **Type**: `unsigned integer`

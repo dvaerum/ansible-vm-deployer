@@ -976,9 +976,12 @@ class TestOnBrokenScript:
 
     @pytest.mark.asyncio
     async def test_stores_on_broken_and_libvirt_uri(self, cleaner_with_script):
-        """Constructor stores on_broken and libvirt_uri."""
+        """Constructor stores on_broken, libvirt_uri, and on-broken options."""
         assert cleaner_with_script.on_broken == "/path/to/handler.sh"
         assert cleaner_with_script.libvirt_uri == "qemu:///system"
+        assert cleaner_with_script.on_broken_timeout == 300
+        assert cleaner_with_script.on_broken_retries is None
+        assert cleaner_with_script.on_broken_retry_delay == 60
 
     @pytest.mark.asyncio
     async def test_run_on_broken_script_called_after_mark_broken(
@@ -1052,6 +1055,8 @@ class TestOnBrokenScript:
     ):
         """Non-zero exit code from script is logged but does not raise."""
         mock_conn.lookupByName.return_value = Mock()
+        # Set retries=0 so it doesn't retry after failure
+        cleaner_with_script.on_broken_retries = 0
 
         with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
              patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec:
@@ -1070,8 +1075,10 @@ class TestOnBrokenScript:
     async def test_script_timeout_kills_process(
         self, cleaner_with_script, mock_conn
     ):
-        """Script exceeding 60s timeout is killed."""
+        """Script exceeding on_broken_timeout is killed."""
         mock_conn.lookupByName.return_value = Mock()
+        # Set retries=0 so it doesn't retry after timeout
+        cleaner_with_script.on_broken_retries = 0
 
         with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
              patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec:
@@ -1095,6 +1102,8 @@ class TestOnBrokenScript:
     ):
         """Exceptions from subprocess are caught and logged, not propagated."""
         mock_conn.lookupByName.return_value = Mock()
+        # Set retries=0 so it doesn't retry after exception
+        cleaner_with_script.on_broken_retries = 0
 
         with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
              patch('asyncio.create_subprocess_exec',
@@ -1127,3 +1136,146 @@ class TestOnBrokenScript:
             call_kwargs = mock_exec.call_args
             env = call_kwargs.kwargs.get("env") or call_kwargs[1].get("env")
             assert env["VM_IP"] == ""
+
+    @pytest.mark.asyncio
+    async def test_script_retries_on_failure(
+        self, cleaner_with_script, mock_conn
+    ):
+        """Script is retried on non-zero exit until it succeeds."""
+        mock_conn.lookupByName.return_value = Mock()
+        cleaner_with_script.on_broken_retry_delay = 0  # no delay in tests
+
+        with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
+             patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec:
+
+            # Fail twice, then succeed
+            mock_proc_fail = AsyncMock()
+            mock_proc_fail.communicate.return_value = (b"", b"")
+            mock_proc_fail.returncode = 1
+
+            mock_proc_ok = AsyncMock()
+            mock_proc_ok.communicate.return_value = (b"", b"")
+            mock_proc_ok.returncode = 0
+
+            mock_exec.side_effect = [mock_proc_fail, mock_proc_fail, mock_proc_ok]
+
+            await cleaner_with_script._run_on_broken_script(
+                "test-vm", "test-uuid-123", "10.0.0.5"
+            )
+
+            assert mock_exec.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_script_retries_limited_by_on_broken_retries(
+        self, cleaner_with_script, mock_conn
+    ):
+        """Script stops retrying after on_broken_retries attempts."""
+        mock_conn.lookupByName.return_value = Mock()
+        cleaner_with_script.on_broken_retries = 2  # 1 initial + 2 retries = 3 total
+        cleaner_with_script.on_broken_retry_delay = 0
+
+        with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
+             patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec:
+
+            mock_proc = AsyncMock()
+            mock_proc.communicate.return_value = (b"", b"")
+            mock_proc.returncode = 1
+            mock_exec.return_value = mock_proc
+
+            await cleaner_with_script._run_on_broken_script(
+                "test-vm", "test-uuid-123", "10.0.0.5"
+            )
+
+            # 1 initial + 2 retries = 3 total
+            assert mock_exec.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_script_retries_on_timeout(
+        self, cleaner_with_script, mock_conn
+    ):
+        """Script is retried after timeout, then succeeds."""
+        mock_conn.lookupByName.return_value = Mock()
+        cleaner_with_script.on_broken_retry_delay = 0
+
+        with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
+             patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec:
+
+            # First call times out
+            mock_proc_timeout = AsyncMock()
+            mock_proc_timeout.communicate.side_effect = asyncio.TimeoutError()
+            mock_proc_timeout.kill = Mock()
+            mock_proc_timeout.wait = AsyncMock()
+
+            # Second call succeeds
+            mock_proc_ok = AsyncMock()
+            mock_proc_ok.communicate.return_value = (b"", b"")
+            mock_proc_ok.returncode = 0
+
+            mock_exec.side_effect = [mock_proc_timeout, mock_proc_ok]
+
+            await cleaner_with_script._run_on_broken_script(
+                "test-vm", "test-uuid-123", "10.0.0.5"
+            )
+
+            assert mock_exec.call_count == 2
+            mock_proc_timeout.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_script_uses_configurable_timeout(
+        self, mock_conn, ssh_checker, vm_tracker
+    ):
+        """Script uses on_broken_timeout instead of hardcoded 60s."""
+        cleaner = TagCleaner(
+            conn=mock_conn,
+            ssh_checker=ssh_checker,
+            vm_tracker=vm_tracker,
+            tags_to_remove=["used"],
+            broken_tag="broken",
+            on_broken="/path/to/handler.sh",
+            on_broken_timeout=600,
+            on_broken_retries=0,
+        )
+        mock_conn.lookupByName.return_value = Mock()
+
+        with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
+             patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec:
+
+            mock_proc = AsyncMock()
+            mock_proc.communicate.return_value = (b"", b"")
+            mock_proc.returncode = 0
+            mock_exec.return_value = mock_proc
+
+            # Patch asyncio.wait_for to verify the timeout value
+            with patch('asyncio.wait_for', new_callable=AsyncMock) as mock_wait_for:
+                mock_wait_for.return_value = (b"", b"")
+
+                await cleaner._run_on_broken_script(
+                    "test-vm", "test-uuid-123", "10.0.0.5"
+                )
+
+                # Verify timeout=600 was passed to wait_for
+                mock_wait_for.assert_called_once()
+                _, kwargs = mock_wait_for.call_args
+                assert kwargs["timeout"] == 600
+
+    @pytest.mark.asyncio
+    async def test_script_zero_retries_runs_once(
+        self, cleaner_with_script, mock_conn
+    ):
+        """With on_broken_retries=0, script runs exactly once even on failure."""
+        mock_conn.lookupByName.return_value = Mock()
+        cleaner_with_script.on_broken_retries = 0
+
+        with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
+             patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec:
+
+            mock_proc = AsyncMock()
+            mock_proc.communicate.return_value = (b"", b"")
+            mock_proc.returncode = 1
+            mock_exec.return_value = mock_proc
+
+            await cleaner_with_script._run_on_broken_script(
+                "test-vm", "test-uuid-123", "10.0.0.5"
+            )
+
+            assert mock_exec.call_count == 1
