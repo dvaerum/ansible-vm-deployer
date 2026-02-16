@@ -72,7 +72,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
     - `--on-broken-retry-delay SECONDS` (default: 60) — delay between retries
   - New NixOS options: `onBrokenTimeout` (default: 300), `onBrokenRetries` (default: null = unlimited), `onBrokenRetryDelay` (default: 60)
 
-- **`scripts/reset-vm-disks.sh`** — New on-broken script for resetting VM disks. Handles both file-backed disks (`<source file=.../>`) and pool-backed volumes (`<source pool=... volume=.../>`). Parses VM inactive XML directly, gracefully shuts down the VM, recreates disks at their original size, and restarts the VM.
+- **`scripts/reset-vm-disks.sh`** — New on-broken script for resetting VM disks. Handles both file-backed disks (`<source file=.../>`) and pool-backed volumes (`<source pool=... volume=.../>`). Parses VM inactive XML directly, force-stops the VM (broken VMs are unresponsive, so graceful ACPI shutdown is unreliable), recreates disks at their original size, and restarts the VM.
 
 - **Default SSH timeout** — `--max-wait-time` now defaults to 1800 seconds (30 minutes) instead of infinite. This prevents unbounded resource accumulation from monitors that can never succeed.
   - NixOS option `services.vm-manager.maxWaitTime` default changed from `null` to `1800`

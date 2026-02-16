@@ -9,13 +9,11 @@
 # Environment variables (set by vm-manager --on-broken):
 #   VM_NAME       — name of the broken VM (required)
 #   LIBVIRT_URI   — libvirt connection URI (default: qemu:///system)
-#   VM_WAIT_TIME  — max seconds to wait for graceful shutdown (default: 120)
 #
 set -euo pipefail
 
 VM_NAME="${VM_NAME:?VM_NAME is required}"
 LIBVIRT_URI="${LIBVIRT_URI:-qemu:///system}"
-VM_WAIT_TIME="${VM_WAIT_TIME:-120}"
 
 V="virsh -c ${LIBVIRT_URI}"
 
@@ -122,26 +120,16 @@ if [[ ${#DISK_PATHS[@]} -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Shut down the VM
+# 2. Force-stop the VM (it's already broken — graceful ACPI shutdown is
+#    unreliable because the guest OS may be unresponsive)
 # ---------------------------------------------------------------------------
-echo "[2/4] Shutting down VM..."
+echo "[2/4] Stopping VM..."
 
 state=$($V domstate "$VM_NAME" | tr -d '[:space:]')
-if [[ "$state" == "running" ]]; then
-    $V shutdown "$VM_NAME" >/dev/null
-    elapsed=0
-    while [[ $elapsed -lt $VM_WAIT_TIME ]]; do
-        state=$($V domstate "$VM_NAME" | tr -d '[:space:]')
-        [[ "$state" == "shutoff" ]] && break
-        sleep 5
-        elapsed=$((elapsed + 5))
-    done
-    state=$($V domstate "$VM_NAME" | tr -d '[:space:]')
-    if [[ "$state" != "shutoff" ]]; then
-        echo "  Graceful shutdown timed out after ${VM_WAIT_TIME}s, forcing destroy..."
-        $V destroy "$VM_NAME" >/dev/null
-        sleep 2
-    fi
+if [[ "$state" != "shutoff" ]]; then
+    echo "  VM is ${state}, force-destroying..."
+    $V destroy "$VM_NAME" >/dev/null
+    sleep 2
 fi
 
 state=$($V domstate "$VM_NAME" | tr -d '[:space:]')
