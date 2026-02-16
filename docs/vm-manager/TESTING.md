@@ -110,7 +110,7 @@ sudo nix develop -c python3 -m pytest tests/vm_manager/ -k "debounce" -v
 
 All unit tests use mocked dependencies for isolation and speed.
 
-### test_vm_tracker.py (8 tests)
+### test_vm_tracker.py (7 tests)
 
 Tests session management and debouncing logic.
 

@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 import paramiko
-from datetime import datetime, timedelta
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +157,7 @@ class SSHChecker:
         """
         # Use run_in_executor to run paramiko in a thread pool
         # (paramiko is synchronous, but we want async)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         
         try:
             result = await loop.run_in_executor(

@@ -180,7 +180,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
 - **346 comprehensive unit tests** covering all 7 race condition fixes, broken tag feature, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), repair flow, CancelledError handling, and stale tag scanning:
   - `tests/conftest.py`: Shared fixtures (`make_mock_domain()`, `make_mock_conn()`)
   - `tests/test_tag_filters.py`: 14 tests (`vm_matches_tags()` — required/exclude tags)
-  - `tests/test_vm_operations.py`: 38 tests (tag CRUD, IP resolution, state strings)
+  - `tests/test_vm_operations.py`: 45 tests (tag CRUD, IP resolution, state strings)
   - `tests/test_metadata_manager.py`: 41 tests (MetadataManager get/set/claim/clear)
   - `tests/test_allocate_vms.py`: 37 tests (VM allocation with auto-exclude broken)
   - `tests/vm_manager/test_daemon.py`: 70 tests (event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag, on-broken timeout/retries/delay init)

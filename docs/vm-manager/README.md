@@ -166,9 +166,9 @@ sudo nix develop -c python3 -m vm_manager.cli \
 | `--broken-tag TAG` | broken | Tag to add when SSH times out after max-wait-time |
 | `--no-broken-tag` | | Don't add a tag on timeout (just stop monitoring) |
 | `--on-broken PATH` | | External script to run when a VM is marked broken |
-| `--on-broken-timeout SECONDS` | 300 | Max time before killing the on-broken script |
-| `--on-broken-retries COUNT` | unlimited | Max retry attempts (omit for infinite retries) |
-| `--on-broken-retry-delay SECONDS` | 60 | Delay between on-broken script retries |
+| `--on-broken-timeout SECONDS` | 300 | Max time before killing the on-broken script (min: 1) |
+| `--on-broken-retries COUNT` | unlimited | Max retry attempts, omit for infinite (min: 0) |
+| `--on-broken-retry-delay SECONDS` | 60 | Delay between on-broken script retries (min: 1) |
 
 When a VM fails SSH checks for `--max-wait-time` seconds, it is tagged with `--broken-tag` (default: `broken`). The `used` tag is intentionally kept so the VM won't be reallocated by ansible-deployer.
 
@@ -316,7 +316,7 @@ For detailed architecture documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
 3. **Debouncing**: `VMTracker` checks if VM is already being monitored
 4. **IP Resolution**: `TagCleaner` gets VM IP with retry logic (skips loopback `127.*`)
 5. **SSH Check**: `SSHChecker` waits for SSH with uptime < 120s verification
-6. **Timeout Handling**: If SSH times out, VM is tagged `broken` (configurable), then `--on-broken` script is called if configured
+6. **Timeout Handling**: If SSH times out, VM is tagged `broken` (configurable), tracker slot is freed, then `--on-broken` script is called if configured. If the script succeeds, the broken tag is removed and fresh SSH monitoring is triggered.
 7. **In-Use Check**: `TagCleaner` verifies no deployer session is active (`in_use` metadata)
 8. **Tag Removal**: `TagCleaner` removes specified tags when all checks pass
 9. **Cleanup**: `VMTracker` stops monitoring the VM

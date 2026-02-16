@@ -257,10 +257,12 @@ class SSHConfig:
 4. Get VM IP address (retry up to 10 times, skip 127.*)
    ↓
 5. Wait for SSH with uptime < 120s (SSHChecker)
-   ├─ timeout → 5b. Mark VM as broken (add 'broken' tag, keep 'used')
-   │              → 5c. Run --on-broken script if configured (async, 60s timeout)
-   │              → Stop monitoring
-   └─ success ↓
+    ├─ timeout → 5b. Mark VM as broken (add 'broken' tag, keep 'used')
+    │              → 5c. Free tracker slot (allow fresh monitoring)
+    │              → 5d. Run --on-broken script if configured (async, 300s timeout, retries)
+    │                    ├─ success → Remove broken tag, trigger re-monitoring
+    │                    └─ failure → VM stays broken (stale scan may clean up)
+    └─ success ↓
 6. Wait 5 seconds (let ansible-deployer finish cleanup)
    ↓
 7. Check in_use metadata
@@ -288,7 +290,7 @@ class SSHConfig:
 - **Solution**: After `--max-wait-time` (default: 30 minutes), add a `--broken-tag` (default: `broken`) to the VM
 - **Behavior**: The `used` tag is intentionally kept so the VM won't be reallocated. The `broken` tag provides visibility for external monitoring.
 - **Auto-exclude**: The daemon auto-appends `broken_tag` to `exclude_tags`, so broken VMs won't be re-monitored on the next reboot or `--check-existing` scan. The ansible-deployer also auto-excludes `broken` VMs from allocation.
-- **On-broken hook**: If `--on-broken /path/to/script.sh` is configured, the script is called asynchronously after tagging. It receives `VM_NAME`, `VM_UUID`, `VM_IP`, `VM_TAGS`, `VM_BROKEN_TAG`, `VM_WAIT_TIME`, and `LIBVIRT_URI` as environment variables. The script timeout is configurable via `--on-broken-timeout` (default: 300 seconds). The script retries on failure with configurable retry count (`--on-broken-retries`, default: unlimited) and delay (`--on-broken-retry-delay`, default: 60 seconds). Non-zero exits are logged as warnings.
+- **On-broken hook**: If `--on-broken /path/to/script.sh` is configured, the tracker slot is freed first (so the script can restart the VM without debounce conflicts), then the script is called. It receives `VM_NAME`, `VM_UUID`, `VM_IP`, `VM_TAGS`, `VM_BROKEN_TAG`, `VM_WAIT_TIME`, and `LIBVIRT_URI` as environment variables. The script timeout is configurable via `--on-broken-timeout` (default: 300 seconds, minimum: 1). The script retries on failure with configurable retry count (`--on-broken-retries`, default: unlimited, minimum: 0) and delay (`--on-broken-retry-delay`, default: 60 seconds, minimum: 1). `_run_on_broken_script()` returns `bool`: `True` on success (exit 0), `False` if disabled or retries exhausted. On success, `_handle_successful_repair()` removes the broken tag and triggers `handle_vm_started()` for fresh monitoring.
 
 **Dependencies**: SSHChecker, VMTracker, MetadataManager, vm_tools_common
 
@@ -349,8 +351,13 @@ class SSHConfig:
 │              │    • Returns "success" / "timeout" / "auth_failure"
 └──────┬───────┘    
        │
-       ├── timeout ──► 8b. _mark_vm_broken() (add 'broken' tag)
-       │                    └──► 8c. _run_on_broken_script() (if --on-broken configured)
+        ├── timeout ──► 8b. _mark_vm_broken() (add 'broken' tag)
+        │                    └──► 8c. vm_tracker.stop_monitoring() (free slot)
+        │                         └──► 8d. _run_on_broken_script() → returns bool
+        │                              ├─ True  → _handle_successful_repair()
+        │                              │          ├─ _remove_broken_tag()
+        │                              │          └─ handle_vm_started() (re-monitor)
+        │                              └─ False → VM stays broken
        │
        ▼ success
 ┌──────────────┐

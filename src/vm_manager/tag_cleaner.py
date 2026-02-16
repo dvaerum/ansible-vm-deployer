@@ -413,7 +413,7 @@ class TagCleaner:
         
         Args:
             vm_name: VM name
-            vm_uuid: VM UUID (for logging)
+            vm_uuid: VM UUID
         """
         if not self.broken_tag:
             return
@@ -423,7 +423,7 @@ class TagCleaner:
         try:
             logger.info(
                 f"Removing broken tag '{self.broken_tag}' from VM "
-                f"{vm_name} after successful repair"
+                f"{vm_name} (uuid={vm_uuid}) after successful repair"
             )
             
             def do_remove_broken_tag():
@@ -432,7 +432,7 @@ class TagCleaner:
                     domain = self.conn.lookupByName(vm_name)
                     remove_vm_tag(self.conn, domain, self.broken_tag)
                 except libvirt.libvirtError as e:
-                    raise Exception(f"Failed to remove broken tag: {e}")
+                    raise Exception(f"Failed to remove broken tag: {e}") from e
             
             await loop.run_in_executor(None, do_remove_broken_tag)
             
@@ -461,7 +461,7 @@ class TagCleaner:
         
         Args:
             vm_name: VM name
-            vm_uuid: VM UUID (for logging)
+            vm_uuid: VM UUID
         """
         if not self.broken_tag:
             logger.info(
@@ -484,7 +484,7 @@ class TagCleaner:
                     domain = self.conn.lookupByName(vm_name)
                     add_vm_tag(self.conn, domain, self.broken_tag)
                 except libvirt.libvirtError as e:
-                    raise Exception(f"Failed to add broken tag: {e}")
+                    raise Exception(f"Failed to add broken tag: {e}") from e
             
             await loop.run_in_executor(None, add_broken_tag)
             
@@ -540,7 +540,11 @@ class TagCleaner:
                 try:
                     domain = self.conn.lookupByName(vm_name)
                     return get_vm_tags(domain)
-                except Exception:
+                except Exception as e:
+                    logger.debug(
+                        f"Could not get tags for VM {vm_name} "
+                        f"(for on-broken script env): {e}"
+                    )
                     return []
             
             vm_tags = await loop.run_in_executor(None, get_tags)
@@ -737,7 +741,7 @@ class TagCleaner:
                         domain = self.conn.lookupByName(vm_name)
                         remove_vm_tag(self.conn, domain, tag)
                     except libvirt.libvirtError as e:
-                        raise Exception(f"Failed to remove tag: {e}")
+                        raise Exception(f"Failed to remove tag: {e}") from e
                 
                 # Run in thread pool to avoid blocking
                 await loop.run_in_executor(None, remove_tag_for_vm)

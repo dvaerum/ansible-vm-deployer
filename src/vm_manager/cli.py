@@ -13,7 +13,7 @@ from .daemon import run_daemon
 from .ssh_checker import SSHConfig
 
 
-def main():
+def main() -> int:
     """Main entry point for vm-manager CLI."""
     parser = argparse.ArgumentParser(
         prog="vm-manager",
@@ -214,13 +214,14 @@ Examples:
         if not os.access(args.on_broken, os.X_OK):
             parser.error(f"On-broken script is not executable: {args.on_broken}")
 
-    # Validate on-broken numeric options
-    if args.on_broken_timeout < 1:
-        parser.error("--on-broken-timeout must be at least 1 second")
-    if args.on_broken_retry_delay < 1:
-        parser.error("--on-broken-retry-delay must be at least 1 second")
-    if args.on_broken_retries is not None and args.on_broken_retries < 0:
-        parser.error("--on-broken-retries must be a non-negative integer (0 = no retries)")
+    # Validate on-broken numeric options (only when --on-broken is set)
+    if args.on_broken:
+        if args.on_broken_timeout < 1:
+            parser.error("--on-broken-timeout must be at least 1 second")
+        if args.on_broken_retry_delay < 1:
+            parser.error("--on-broken-retry-delay must be at least 1 second")
+        if args.on_broken_retries is not None and args.on_broken_retries < 0:
+            parser.error("--on-broken-retries must be a non-negative integer (0 = no retries)")
 
     # Setup logging
     log_level = getattr(logging, args.log_level.upper())
@@ -241,7 +242,7 @@ Examples:
     if args.ssh_password_file:
         logger.info(f"SSH password file: {args.ssh_password_file}")
     logger.info(f"Check interval: {args.check_interval}s")
-    if args.max_wait_time:
+    if args.max_wait_time is not None and args.max_wait_time > 0:
         logger.info(f"Max wait time: {args.max_wait_time}s ({args.max_wait_time // 60} minutes)")
     else:
         logger.info("Max wait time: infinite")

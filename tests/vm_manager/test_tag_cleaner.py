@@ -1011,11 +1011,11 @@ class TestOnBrokenScript:
         self, cleaner_without_script, mock_domain, mock_conn
     ):
         """When on_broken is None, _run_on_broken_script returns immediately."""
-        # Should return without doing anything
-        await cleaner_without_script._run_on_broken_script(
+        # Should return False without doing anything
+        result = await cleaner_without_script._run_on_broken_script(
             "test-vm", "test-uuid-123", "10.0.0.5"
         )
-        # No crash, no subprocess calls
+        assert result is False
 
     @pytest.mark.asyncio
     async def test_script_receives_correct_env_vars(
@@ -1066,10 +1066,11 @@ class TestOnBrokenScript:
             mock_proc.returncode = 1
             mock_exec.return_value = mock_proc
 
-            # Should not raise
-            await cleaner_with_script._run_on_broken_script(
+            # Should not raise, and should return False
+            result = await cleaner_with_script._run_on_broken_script(
                 "test-vm", "test-uuid-123", "10.0.0.5"
             )
+            assert result is False
 
     @pytest.mark.asyncio
     async def test_script_timeout_kills_process(
@@ -1089,11 +1090,11 @@ class TestOnBrokenScript:
             mock_proc.wait = AsyncMock()
             mock_exec.return_value = mock_proc
 
-            # Should not raise
-            await cleaner_with_script._run_on_broken_script(
+            # Should not raise, and should return False
+            result = await cleaner_with_script._run_on_broken_script(
                 "test-vm", "test-uuid-123", "10.0.0.5"
             )
-
+            assert result is False
             mock_proc.kill.assert_called_once()
 
     @pytest.mark.asyncio
@@ -1109,10 +1110,11 @@ class TestOnBrokenScript:
              patch('asyncio.create_subprocess_exec',
                    side_effect=FileNotFoundError("/path/to/handler.sh")):
 
-            # Should not raise
-            await cleaner_with_script._run_on_broken_script(
+            # Should not raise, and should return False
+            result = await cleaner_with_script._run_on_broken_script(
                 "test-vm", "test-uuid-123", "10.0.0.5"
             )
+            assert result is False
 
     @pytest.mark.asyncio
     async def test_empty_ip_passed_when_none(
@@ -1159,10 +1161,11 @@ class TestOnBrokenScript:
 
             mock_exec.side_effect = [mock_proc_fail, mock_proc_fail, mock_proc_ok]
 
-            await cleaner_with_script._run_on_broken_script(
+            result = await cleaner_with_script._run_on_broken_script(
                 "test-vm", "test-uuid-123", "10.0.0.5"
             )
 
+            assert result is True
             assert mock_exec.call_count == 3
 
     @pytest.mark.asyncio
@@ -1182,10 +1185,11 @@ class TestOnBrokenScript:
             mock_proc.returncode = 1
             mock_exec.return_value = mock_proc
 
-            await cleaner_with_script._run_on_broken_script(
+            result = await cleaner_with_script._run_on_broken_script(
                 "test-vm", "test-uuid-123", "10.0.0.5"
             )
 
+            assert result is False
             # 1 initial + 2 retries = 3 total
             assert mock_exec.call_count == 3
 
@@ -1213,10 +1217,11 @@ class TestOnBrokenScript:
 
             mock_exec.side_effect = [mock_proc_timeout, mock_proc_ok]
 
-            await cleaner_with_script._run_on_broken_script(
+            result = await cleaner_with_script._run_on_broken_script(
                 "test-vm", "test-uuid-123", "10.0.0.5"
             )
 
+            assert result is True
             assert mock_exec.call_count == 2
             mock_proc_timeout.kill.assert_called_once()
 
