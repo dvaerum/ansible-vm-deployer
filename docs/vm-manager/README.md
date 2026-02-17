@@ -41,7 +41,7 @@ This tool is ideal for automated provisioning pipelines where you need to know w
 - ✅ **Auto-Exclude Broken VMs**: Daemon auto-excludes broken VMs from monitoring; deployer auto-excludes them from allocation
 - ✅ **On-Broken Script Hook**: Optional external script called when a VM is marked broken (`--on-broken`)
 - ✅ **Periodic Stale Tag Scan**: Background loop detects and removes stale `used` tags from VMs that were never rebooted after deploy
-- ✅ **Retry Logic**: Intelligent retry for both SSH and IP address resolution (skips loopback IPs)
+- ✅ **Retry Logic**: Intelligent retry for both SSH and IP address resolution (loopback IPs filtered by shared library)
 - ✅ **Debouncing**: Prevents duplicate processing during VM reboots
 - ✅ **Parallel Processing**: Handle multiple VMs concurrently with asyncio
 
@@ -314,7 +314,7 @@ For detailed architecture documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
 1. **Event Detection**: `EventMonitor` detects VM reboot/start event from libvirt
 2. **Tag Pre-check**: Daemon verifies VM has removable tags (e.g., `used`), skips if not
 3. **Debouncing**: `VMTracker` checks if VM is already being monitored
-4. **IP Resolution**: `TagCleaner` gets VM IP with retry logic (skips loopback `127.*`)
+4. **IP Resolution**: `TagCleaner` gets VM IP with retry logic (loopback `127.*` filtered by shared `get_vm_ip()`)
 5. **SSH Check**: `SSHChecker` waits for SSH with uptime < 120s verification
 6. **Timeout Handling**: If SSH times out, VM is tagged `broken` (configurable), tracker slot is freed, then `--on-broken` script is called if configured. If the script succeeds, the broken tag is removed and fresh SSH monitoring is triggered.
 7. **In-Use Check**: `TagCleaner` verifies no deployer session is active (`in_use` metadata)

@@ -133,23 +133,14 @@ class TagCleaner:
                 
                 ip_address = await loop.run_in_executor(None, get_ip_for_vm)
                 
-                if ip_address and not ip_address.startswith("127."):
+                if ip_address:
                     logger.info(
                         f"Got IP address {ip_address} for VM {vm_name} "
                         f"(attempt {attempt}/{max_attempts})"
                     )
                     return ip_address
                 
-                if ip_address and ip_address.startswith("127."):
-                    logger.debug(
-                        f"VM {vm_name} returned loopback address {ip_address}, "
-                        f"retrying in {retry_interval}s "
-                        f"(attempt {attempt}/{max_attempts})"
-                    )
-                    if attempt < max_attempts:
-                        await asyncio.sleep(retry_interval)
-                    continue
-                
+                # No valid IP yet (loopback addresses are filtered by get_vm_ip)
                 if attempt < max_attempts:
                     logger.debug(
                         f"VM {vm_name} has no IP yet, retrying in {retry_interval}s "

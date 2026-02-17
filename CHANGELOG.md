@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - Shared Library
+
+- **Fix: Loopback IPs returned by `get_vm_ip()`** — The shared `get_vm_ip()` in `vm_tools_common` now filters out `127.*` loopback addresses, returning `None` instead. Previously, loopback filtering was only in the vm-manager, so ansible-deployer would pass `127.0.0.1` to Ansible (causing SSH-to-localhost failures). Both tools now benefit from the shared filter.
+
 ### Fixed - VM Manager (Critical Review)
 
 - **Fix: Retry loop holds tracker slot** — When `_run_on_broken_script` ran inside `_monitor_vm`, it held the vm_tracker session. If the script restarted the VM, the new start event was debounced (tracker occupied) AND auto-excluded (broken tag). After script success, the VM was stranded with stale tags. Now `_monitor_vm` frees the tracker slot before running the on-broken script, and on successful repair, removes the broken tag and triggers fresh SSH monitoring via `handle_vm_started()`.
@@ -18,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed - Ansible Deployer
 
 - **`--repeat N` for repeated playbook execution** — New `deploy` argument that runs the playbook N times on the same VM without reset between iterations. Stops on first failure. Each iteration gets its own log files (`_run-1`, `_run-2`, etc.). Default is 1 (backward compatible — no suffix added).
+- **`--repeat` metavar cleanup** — Help text now shows `--repeat N` instead of the confusing `--repeat INTEGER RANGE`.
 
 - **`--log-prefix` now supports subdirectories** — Using `--log-prefix test/linux` creates log files under `logs/test/linux_<timestamp>_stdout.log` instead of replacing `/` with `-`. Parent directories are created automatically. Other special characters (spaces, dots, etc.) are still replaced with hyphens.
 
@@ -44,7 +49,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
 
 - **Fix: Orphaned monitor tasks for VMs without removable tags** — Added tag check in `_handle_vm_started()` to verify the VM actually has tags that need removing before starting a monitor. Previously, when `reset_vm()` rebooted a VM after the `used` tag was already removed, vm-manager would start a new infinite SSH retry loop. These orphaned monitors accumulated without bound.
 
-- **Fix: Loopback IP (127.0.0.1) during boot** — `_get_vm_ip_with_retry()` now skips `127.*` addresses returned by the QEMU guest agent before the real NIC is up, retrying until a routable IP is available.
+- **Fix: Loopback IP (127.0.0.1) during boot** — `_get_vm_ip_with_retry()` retries until a routable IP is available. Loopback addresses (`127.*`) are now filtered by the shared `get_vm_ip()` in `vm_tools_common` (see "Fixed - Shared Library" above).
 
 - **Fix: Mid-run tag removal race condition** — Added `in_use` metadata check before removing the `used` tag. A playbook may reboot the VM mid-run (e.g., OS install), triggering vm-manager to detect the reboot and eventually SSH in. Without this check, vm-manager would remove the `used` tag while ansible-deployer was still actively orchestrating the VM, allowing another deployer to allocate it concurrently.
 

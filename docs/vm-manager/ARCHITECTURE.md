@@ -238,7 +238,7 @@ class SSHConfig:
 **Purpose**: Orchestrate the complete VM processing workflow
 
 **Responsibilities**:
-- Get VM IP address (with retry, skipping loopback addresses)
+- Get VM IP address (with retry; loopback addresses filtered by shared `get_vm_ip()`)
 - Coordinate SSH checking with uptime verification
 - Check `in_use` metadata before tag removal (prevents mid-run removal)
 - Remove tags after SSH success + safety checks pass
@@ -254,7 +254,7 @@ class SSHConfig:
    ↓
 3. Register with VMTracker (debouncing check)
    ↓
-4. Get VM IP address (retry up to 10 times, skip 127.*)
+4. Get VM IP address (retry up to 10 times; 127.* filtered by shared get_vm_ip)
    ↓
 5. Wait for SSH with uptime < 120s (SSHChecker)
     ├─ timeout → 5b. Mark VM as broken (add 'broken' tag, keep 'used')
@@ -282,7 +282,7 @@ class SSHConfig:
 **IP Retry Logic**:
 - **Problem**: VMs may not have IP immediately after start (DHCP lease renewal)
 - **Solution**: Retry up to 10 times with 3s intervals (30s total)
-- **Loopback skip**: Addresses matching `127.*` are ignored (QEMU guest agent may return loopback before real NIC is up)
+- **Loopback skip**: Addresses matching `127.*` are filtered by the shared `get_vm_ip()` in `vm_tools_common` (QEMU guest agent may return loopback before real NIC is up). Both ansible-deployer and vm-manager benefit from this filter.
 - **Benefit**: Handles rapid VM restarts gracefully
 
 **Broken VM Tagging**:
@@ -340,7 +340,7 @@ class SSHConfig:
        ▼
 ┌──────────────┐
 │ TagCleaner   │ 7. _monitor_vm()
-│              │    • Get IP (retry, skip 127.*)
+│              │    • Get IP (retry; 127.* filtered)
 └──────┬───────┘    
        │
        ▼

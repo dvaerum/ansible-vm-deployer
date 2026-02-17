@@ -137,7 +137,7 @@ def main(ctx: click.Context, config: Optional[Path], project_root: Optional[Path
 @click.option("--allocation-timeout", type=int, help="Timeout in seconds for VM allocation (default: infinite retry)")
 @click.option("--ansible-flags", help="Additional flags to pass to ansible-playbook (e.g., '--check --diff' or '-vvv')")
 @click.option("--log-prefix", help="Prefix for log filenames. Supports subdirectories (e.g., 'test/linux' creates logs/test/linux_<timestamp>_stdout.log)")
-@click.option("--repeat", default=1, type=click.IntRange(min=1), help="Number of times to execute the playbook (default: 1). Runs on the same VM without reset between iterations. Stops on first failure.")
+@click.option("--repeat", default=1, type=click.IntRange(min=1), metavar="N", help="Number of times to execute the playbook (default: 1). Runs on the same VM without reset between iterations. Stops on first failure.")
 @click.option("--quiet", is_flag=True, help="Suppress Ansible output to console (still writes to log files)")
 @click.option("--mark-in-use", "mark_in_use_tag", is_flag=False, flag_value="used", default=None, help="Add usage tag to VM description after allocation (default: 'used' if no value given)")
 @click.option("--mark-available", is_flag=True, help="Remove usage tag from VM description after reset")

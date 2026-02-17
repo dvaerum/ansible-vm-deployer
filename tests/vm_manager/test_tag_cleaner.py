@@ -530,10 +530,14 @@ class TestTagCleaner:
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_get_vm_ip_skips_loopback_and_retries(
+    async def test_get_vm_ip_retries_when_no_ip(
         self, tag_cleaner, mock_domain, mock_conn
     ):
-        """_get_vm_ip_with_retry should skip 127.x.x.x addresses and retry."""
+        """_get_vm_ip_with_retry should retry when get_vm_ip returns None.
+
+        Loopback addresses are filtered by the shared get_vm_ip(), so the
+        tag cleaner sees None and retries until a real IP appears.
+        """
         mock_conn.lookupByName.return_value = mock_domain
         call_count = 0
 
@@ -541,7 +545,7 @@ class TestTagCleaner:
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
-                return "127.0.0.1"
+                return None  # simulates loopback filtered by get_vm_ip
             return "192.168.1.100"
 
         with patch('vm_manager.tag_cleaner.get_vm_ip', side_effect=mock_get_ip):
@@ -555,13 +559,13 @@ class TestTagCleaner:
             assert call_count == 3
 
     @pytest.mark.asyncio
-    async def test_get_vm_ip_only_loopback_returns_none(
+    async def test_get_vm_ip_all_none_returns_none(
         self, tag_cleaner, mock_domain, mock_conn
     ):
-        """If all attempts return loopback, result is None."""
+        """If all attempts return None (e.g. only loopback), result is None."""
         mock_conn.lookupByName.return_value = mock_domain
 
-        with patch('vm_manager.tag_cleaner.get_vm_ip', return_value="127.0.0.1"):
+        with patch('vm_manager.tag_cleaner.get_vm_ip', return_value=None):
             ip = await tag_cleaner._get_vm_ip_with_retry(
                 "test-vm",
                 max_attempts=3,
@@ -867,15 +871,16 @@ class TestTagCleanerRaceConditions:
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_loopback_during_dhcp_renewal_is_filtered(
+    async def test_no_ip_during_dhcp_renewal_retries_until_real_ip(
         self, cleaner, mock_domain, mock_conn
     ):
         """
-        During DHCP renewal, the VM may briefly report 127.0.0.1.
-        The tag cleaner must keep retrying until a real IP appears.
+        During DHCP renewal, get_vm_ip returns None (loopback addresses are
+        filtered by the shared get_vm_ip). The tag cleaner must keep retrying
+        until a real IP appears.
         """
         mock_conn.lookupByName.return_value = mock_domain
-        ips = ["127.0.0.1", "127.0.1.1", None, "10.0.0.5"]
+        ips = [None, None, None, "10.0.0.5"]
         call_idx = 0
 
         def rotating_ip(domain, network):

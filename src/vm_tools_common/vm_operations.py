@@ -3,9 +3,12 @@ VM operations for libvirt domains.
 
 Provides functions for tag management, IP resolution, and network interface queries.
 """
+import logging
 import libvirt
 import xml.etree.ElementTree as ET
 from typing import List, Optional, Dict
+
+logger = logging.getLogger(__name__)
 
 
 def get_vm_tags(domain: libvirt.virDomain) -> List[str]:
@@ -176,14 +179,28 @@ def get_vm_ip(domain: libvirt.virDomain, network: Optional[str] = None) -> Optio
                 if target_interface in ifaces and ifaces[target_interface]["addrs"]:
                     for addr in ifaces[target_interface]["addrs"]:
                         if addr["type"] == libvirt.VIR_IP_ADDR_TYPE_IPV4:
-                            return addr["addr"]
+                            ip = addr["addr"]
+                            if ip.startswith("127."):
+                                logger.debug(
+                                    "Skipping loopback address %s for VM %s",
+                                    ip, domain.name(),
+                                )
+                                continue
+                            return ip
             else:
                 # Return first IP found from any interface
                 for iface_name, iface_info in ifaces.items():
                     if iface_info["addrs"]:
                         for addr in iface_info["addrs"]:
                             if addr["type"] == libvirt.VIR_IP_ADDR_TYPE_IPV4:
-                                return addr["addr"]
+                                ip = addr["addr"]
+                                if ip.startswith("127."):
+                                    logger.debug(
+                                        "Skipping loopback address %s for VM %s",
+                                        ip, domain.name(),
+                                    )
+                                    continue
+                                return ip
         except libvirt.libvirtError:
             continue
     

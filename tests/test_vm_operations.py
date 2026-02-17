@@ -385,10 +385,11 @@ class TestGetVmIp:
 
     # --- Loopback / IPv6 ---
 
-    def test_loopback_ip_returned_when_only_option(self):
-        """If 127.0.0.1 is the only IPv4 address, it is returned.
+    def test_loopback_ip_is_filtered(self):
+        """If 127.0.0.1 is the only IPv4 address, None is returned.
 
-        The function does not filter out loopback — callers must handle this.
+        Loopback addresses are never valid VM IPs — they indicate the guest
+        hasn't acquired a real address yet (e.g. during DHCP renewal).
         """
         domain = _make_domain(_domain_xml())
         domain.interfaceAddresses.return_value = {
@@ -402,7 +403,7 @@ class TestGetVmIp:
 
         ip = get_vm_ip(domain)
 
-        assert ip == "127.0.0.1"
+        assert ip is None
 
     def test_ipv6_only_interface_is_skipped(self):
         """Interfaces with only IPv6 addresses should not be returned."""
