@@ -85,8 +85,15 @@ def setup_logging(level: str = "INFO") -> None:
 @click.pass_context
 def main(ctx: click.Context, config: Optional[Path], project_root: Optional[Path], log_dir: Optional[Path], log_level: Optional[str], verbose: int) -> None:
     """Ansible Deployer - Deploy playbooks to libvirt VMs with automatic cleanup."""
-    # Load configuration
-    cfg = Config.load(config)
+    # Load configuration (project_root is needed for config search paths)
+    resolved_project_root_for_config = project_root.resolve() if project_root else None
+    cfg = Config.load(config, project_root=resolved_project_root_for_config)
+    
+    # Show which config was loaded
+    if cfg.loaded_from:
+        console.print(f"[dim]Config: {cfg.loaded_from}[/dim]")
+    else:
+        console.print("[dim]Config: using defaults (no config file found)[/dim]")
     
     # Determine log level: --verbose overrides --log-level, which overrides default
     if verbose >= 2:
@@ -225,7 +232,7 @@ def deploy(
     console.print(f"Playbook: {playbook}")
     console.print(f"Log directory: {log_directory}")
     
-    vm_manager = VMManager(cfg.libvirt_uri)
+    vm_manager = VMManager(connections=cfg.get_connections())
     executor = AnsibleExecutor(log_directory)
     reset_manager = VMResetManager()
     
@@ -422,7 +429,7 @@ def list_vms(ctx: click.Context, output_json: bool) -> None:
     """List all VMs and their status."""
     cfg: Config = ctx.obj["config"]
     
-    vm_manager = VMManager(cfg.libvirt_uri)
+    vm_manager = VMManager(connections=cfg.get_connections())
     
     with vm_manager:
         vms = vm_manager.list_vms()
@@ -435,7 +442,12 @@ def list_vms(ctx: click.Context, output_json: bool) -> None:
         console.print("[yellow]No VMs found[/yellow]")
         return
     
+    # Only show Host column when multiple hosts are configured
+    multi_host = len(cfg.get_connections()) > 1
+    
     table = Table(title="Virtual Machines")
+    if multi_host:
+        table.add_column("Host", style="blue")
     table.add_column("Name", style="cyan")
     table.add_column("UUID", style="magenta")
     table.add_column("State", style="green")
@@ -444,14 +456,18 @@ def list_vms(ctx: click.Context, output_json: bool) -> None:
     table.add_column("Task ID")
     
     for vm in vms:
-        table.add_row(
+        row = []
+        if multi_host:
+            row.append(vm.get("host", ""))
+        row.extend([
             vm["name"],
             vm["uuid"],
             vm["state"],
             ", ".join(vm["tags"]) if vm["tags"] else "",
             str(vm["in_use"]),
             vm["task_id"],
-        )
+        ])
+        table.add_row(*row)
     
     console.print(table)
 
@@ -464,7 +480,7 @@ def status(ctx: click.Context, vm_name: str, output_json: bool) -> None:
     """Show detailed status of a VM."""
     cfg: Config = ctx.obj["config"]
     
-    vm_manager = VMManager(cfg.libvirt_uri)
+    vm_manager = VMManager(connections=cfg.get_connections())
     
     try:
         with vm_manager:
@@ -550,7 +566,7 @@ def reset_vm(ctx: click.Context, vm_name: str) -> None:
     """Manually reset a VM (wipefs + reboot)."""
     cfg: Config = ctx.obj["config"]
     
-    vm_manager = VMManager(cfg.libvirt_uri)
+    vm_manager = VMManager(connections=cfg.get_connections())
     reset_manager = VMResetManager()
     
     try:

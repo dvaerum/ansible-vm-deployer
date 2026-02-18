@@ -10,6 +10,7 @@ import pytest
 from unittest.mock import Mock, patch, call
 
 from ansible_deployer.vm_manager import VMManager
+from ansible_deployer.config import LibvirtConnectionConfig
 from tests.conftest import make_mock_domain, make_mock_conn
 
 
@@ -29,9 +30,15 @@ def _make_domain(name, tags, state=libvirt.VIR_DOMAIN_RUNNING, in_use=False):
 
 
 def _build_manager(domains):
-    """Return a VMManager whose connection is a mock returning *domains*."""
-    mgr = VMManager("test:///default")
-    mgr.conn = make_mock_conn(domains)
+    """Return a VMManager with a mock connection returning *domains*.
+
+    Injects a mock connection directly into the internal dicts so that
+    the manager thinks it is already connected (bypassing libvirt.open).
+    """
+    mgr = VMManager(uri="test:///default")
+    mock_conn = make_mock_conn(domains)
+    mgr._connections = {"default": mock_conn}
+    mgr._connected_configs = {"default": LibvirtConnectionConfig(uri="test:///default")}
     return mgr
 
 
@@ -270,8 +277,7 @@ class TestAllocateVms:
 
     # Edge: not connected -> raises RuntimeError
     def test_not_connected_raises(self):
-        mgr = VMManager("test:///default")
-        # conn is None by default
+        mgr = VMManager(uri="test:///default")
 
         with pytest.raises(RuntimeError, match="Not connected"):
             mgr.allocate_vms(["linux-test"], count=1, task_id="x")
@@ -479,7 +485,7 @@ class TestFindAvailableVmsByTags:
         assert result == []
 
     def test_find_not_connected_raises(self):
-        mgr = VMManager("test:///default")
+        mgr = VMManager(uri="test:///default")
 
         with pytest.raises(RuntimeError, match="Not connected"):
             mgr.find_available_vms_by_tags(["linux-test"], count=1)
@@ -588,7 +594,7 @@ class TestFindAvailableVmByTags:
         assert result.name() == "vm-clean"
 
     def test_not_connected_raises(self):
-        mgr = VMManager("test:///default")
+        mgr = VMManager(uri="test:///default")
 
         with pytest.raises(RuntimeError, match="Not connected"):
             mgr.find_available_vm_by_tags(["linux-test"])
@@ -708,3 +714,155 @@ class TestAutoExcludeBrokenTag:
 
         # Caller's list must not be modified
         assert original == ["used"]
+
+
+# ---------------------------------------------------------------------------
+# Tests for multi-host allocation
+# ---------------------------------------------------------------------------
+
+def _build_multi_host_manager(host_domains):
+    """Build a VMManager with multiple mock hosts.
+
+    Args:
+        host_domains: dict of {host_name: [domain_list]}
+
+    Returns:
+        VMManager with injected mock connections for each host.
+    """
+    configs = {}
+    connections = {}
+    connected_configs = {}
+
+    for host_name, domains in host_domains.items():
+        cfg = LibvirtConnectionConfig(uri=f"qemu+ssh://{host_name}/system")
+        configs[host_name] = cfg
+        connections[host_name] = make_mock_conn(domains)
+        connected_configs[host_name] = cfg
+
+    mgr = VMManager(connections=configs)
+    mgr._connections = connections
+    mgr._connected_configs = connected_configs
+    return mgr
+
+
+class TestMultiHostAllocation:
+    """Tests for VM allocation across multiple libvirt hosts."""
+
+    def test_allocate_searches_both_hosts(self):
+        """VMs from both hosts are candidates for allocation."""
+        host1_vms = [_make_domain("host1-vm-0", ["linux-test"])]
+        host2_vms = [_make_domain("host2-vm-0", ["linux-test"])]
+
+        mgr = _build_multi_host_manager({
+            "host1": host1_vms,
+            "host2": host2_vms,
+        })
+
+        with patch("ansible_deployer.vm_manager.MetadataManager") as MockMM:
+            instance = MockMM.return_value
+            instance.is_in_use.return_value = False
+            instance.try_claim.return_value = True
+
+            result = mgr.allocate_vms(["linux-test"], count=2, task_id="multi-1")
+
+        names = [d.name() for d in result]
+        assert len(result) == 2
+        assert "host1-vm-0" in names
+        assert "host2-vm-0" in names
+
+    def test_allocate_respects_host_order(self):
+        """First host's VMs are searched before second host's."""
+        host1_vms = [_make_domain("host1-vm", ["linux-test"])]
+        host2_vms = [_make_domain("host2-vm", ["linux-test"])]
+
+        mgr = _build_multi_host_manager({
+            "host1": host1_vms,
+            "host2": host2_vms,
+        })
+
+        with patch("ansible_deployer.vm_manager.MetadataManager") as MockMM:
+            instance = MockMM.return_value
+            instance.is_in_use.return_value = False
+            instance.try_claim.return_value = True
+
+            # Request only 1 — should come from host1 (first in config order)
+            result = mgr.allocate_vms(["linux-test"], count=1, task_id="order-1")
+
+        assert len(result) == 1
+        assert result[0].name() == "host1-vm"
+
+    def test_allocate_skips_host_with_no_matches(self):
+        """Host with no matching VMs is skipped, next host provides VMs."""
+        host1_vms = [_make_domain("host1-vm", ["other-tag"])]
+        host2_vms = [_make_domain("host2-vm", ["linux-test"])]
+
+        mgr = _build_multi_host_manager({
+            "host1": host1_vms,
+            "host2": host2_vms,
+        })
+
+        with patch("ansible_deployer.vm_manager.MetadataManager") as MockMM:
+            instance = MockMM.return_value
+            instance.is_in_use.return_value = False
+            instance.try_claim.return_value = True
+
+            result = mgr.allocate_vms(["linux-test"], count=1, task_id="skip-1")
+
+        assert len(result) == 1
+        assert result[0].name() == "host2-vm"
+
+    def test_find_available_across_hosts(self):
+        """find_available_vms_by_tags searches all hosts."""
+        host1_vms = [_make_domain("h1-vm", ["linux-test"])]
+        host2_vms = [
+            _make_domain("h2-vm-0", ["linux-test"]),
+            _make_domain("h2-vm-1", ["linux-test"]),
+        ]
+
+        mgr = _build_multi_host_manager({
+            "host1": host1_vms,
+            "host2": host2_vms,
+        })
+
+        with patch("ansible_deployer.vm_manager.MetadataManager") as MockMM:
+            instance = MockMM.return_value
+            instance.is_in_use.return_value = False
+
+            result = mgr.find_available_vms_by_tags(["linux-test"], count=5)
+
+        assert len(result) == 3
+        names = [d.name() for d in result]
+        assert names == ["h1-vm", "h2-vm-0", "h2-vm-1"]
+
+    def test_allocate_empty_hosts(self):
+        """All hosts have zero VMs -> returns empty."""
+        mgr = _build_multi_host_manager({
+            "host1": [],
+            "host2": [],
+        })
+
+        with patch("ansible_deployer.vm_manager.MetadataManager"):
+            result = mgr.allocate_vms(["linux-test"], count=1, task_id="empty-1")
+
+        assert result == []
+
+    def test_broken_excluded_across_hosts(self):
+        """Broken VMs are excluded regardless of which host they're on."""
+        host1_vms = [_make_domain("h1-broken", ["linux-test", "broken"])]
+        host2_vms = [_make_domain("h2-clean", ["linux-test"])]
+
+        mgr = _build_multi_host_manager({
+            "host1": host1_vms,
+            "host2": host2_vms,
+        })
+
+        with patch("ansible_deployer.vm_manager.MetadataManager") as MockMM:
+            instance = MockMM.return_value
+            instance.is_in_use.return_value = False
+            instance.try_claim.return_value = True
+
+            result = mgr.allocate_vms(["linux-test"], count=2, task_id="broken-1")
+
+        names = [d.name() for d in result]
+        assert "h1-broken" not in names
+        assert "h2-clean" in names

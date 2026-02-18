@@ -1,6 +1,6 @@
 # Project Status
 
-**Last Updated:** February 17, 2026  
+**Last Updated:** February 18, 2026  
 **Version:** 0.2.0  
 **Status:** Production-Ready
 
@@ -17,16 +17,18 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 **Purpose:** Deploy Ansible playbooks to ephemeral VMs with automatic cleanup.
 
 **Maturity:** Stable, production-ready  
-**Test Coverage:** 15 tests, 100% pass rate  
+**Test Coverage:** 193 tests, 100% pass rate  
 **Documentation:** Complete
 
 **Key Features:**
+- **Multi-host libvirt connections** — search for VMs across multiple libvirt hosts
 - Tag-based VM selection with exclusion filters
 - Multi-VM allocation for distributed testing
 - Automatic VM reset (wipefs + reboot)
 - Comprehensive logging (stdout + JSON)
 - Metadata-based locking
 - Network-based VM selection
+- Per-host network configuration for IP resolution
 
 **Use Cases:**
 - CI/CD pipelines
@@ -74,7 +76,7 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 #### Testing
 - ✅ 174 VM Manager unit tests
 - ✅ 8 manual tests with real VMs
-- ✅ 100% test pass rate (346/346 total)
+- ✅ 100% test pass rate (367/367 total)
 - ✅ Mocked dependencies for isolation
 
 #### Documentation
@@ -96,16 +98,16 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 
 | Component | Lines of Code | Tests | Documentation |
 |-----------|---------------|-------|---------------|
-| Ansible Deployer | ~2,100 | 172 | ~3,000 |
+| Ansible Deployer | ~2,400 | 193 | ~3,000 |
 | VM Manager | ~2,400 | 174 | ~2,625 |
 | Shared Library | ~450 | Covered by both | - |
-| **Total** | **~4,950** | **346** | **5,625+** |
+| **Total** | **~5,250** | **367** | **5,625+** |
 
 ### Test Coverage
 
 ```
-Total Tests: 346/346 (100% pass rate)
-├── Shared/Deployer: 172 tests
+Total Tests: 367/367 (100% pass rate)
+├── Shared/Deployer: 193 tests
 └── VM Manager: 174 tests
     ├── test_daemon.py: 70 tests
     ├── test_tag_cleaner.py: 59 tests
@@ -421,7 +423,7 @@ Dennis Vestergaard Værum (github@varum.dk)
 
 **Project Quality Metrics:**
 
-- ✅ 100% test pass rate (346/346 tests)
+- ✅ 100% test pass rate (367/367 tests)
 - ✅ Comprehensive documentation (5,625+ lines)
 - ✅ Production-ready code quality
 - ✅ Professional project structure

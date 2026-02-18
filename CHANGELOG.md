@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Ansible Deployer
+
+- **Multi-host libvirt connections** — ansible-deployer can now search for VMs across multiple libvirt hosts. Configure named connections in `config.yaml` with per-host settings:
+  ```yaml
+  libvirt_connections:
+    local:
+      uri: "qemu:///system"
+    remote:
+      uri: "qemu+ssh://root@10.0.0.5/system?keyfile=/root/.ssh/id_rsa"
+      network: "mgmt-net"
+  ```
+  - Hosts are searched in config order during allocation; first matching VM wins
+  - Unreachable hosts are logged as warnings and skipped (remaining hosts still serve VMs)
+  - Per-host `network` field for IP resolution on hosts with non-default networks
+  - Backward compatible: legacy `libvirt_uri: "qemu:///system"` still works
+  - Config search order: `./config.yaml` -> `./config.yml` -> `<project-root>/config.yaml` -> `<project-root>/config.yml` -> `~/.config/ansible-deployer/config.yaml` -> `/etc/ansible-deployer/config.yaml`
+  - CLI prints which config file was loaded (or "using defaults")
+  - `list-vms` table shows `Host` column when multiple hosts are configured
+  - Tag operations (`add_vm_tag`, `remove_vm_tag`) use `domain.connect()` to find the correct connection, no need to track per-domain connections manually
+  - Auth is encoded in the URI itself (SSH keys, host verification, etc.) — see [libvirt URI docs](https://libvirt.org/uri.html)
+
+### Changed - Ansible Deployer
+
+- **Config model updated** — `Config` now uses `model_config = ConfigDict(extra="allow")` (Pydantic v2) instead of deprecated inner `class Config`. New fields: `libvirt_connections` (multi-host dict), updated `libvirt_uri` (now optional, defaults to `None`). `get_connections()` method resolves either format to a consistent dict.
+- **VMManager API changed** — Constructor now accepts `connections=` (dict of `LibvirtConnectionConfig`) or `uri=` (single-host shorthand). Positional string arguments are no longer accepted (raises `TypeError` with helpful message). Internal state uses `_connections` dict instead of single `conn` attribute.
+- **Lazy imports in `ansible_deployer/__init__.py`** — Uses `__getattr__` for lazy loading of `VMManager`, `AnsibleExecutor`, and `MetadataManager`. This prevents the vm-manager Nix package (which shares the source tree) from pulling in pydantic/click/rich at import time.
+
 ### Fixed - Shared Library
 
 - **Fix: Loopback IPs returned by `get_vm_ip()`** — The shared `get_vm_ip()` in `vm_tools_common` now filters out `127.*` loopback addresses, returning `None` instead. Previously, loopback filtering was only in the vm-manager, so ansible-deployer would pass `127.0.0.1` to Ansible (causing SSH-to-localhost failures). Both tools now benefit from the shared filter.
@@ -194,7 +221,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
   - `tests/vm_manager/test_event_monitor.py`: 15 tests (reboot callback registration)
   - `tests/vm_manager/test_vm_tracker.py`: 7 tests (session management, debouncing)
 - **8 manual tests**: All scenarios validated with real VMs
-- **100% test pass rate**: 346/346 total tests
+- **100% test pass rate**: 367/367 total tests
 - **Mocked dependencies**: No real VMs or libvirt connection needed for unit tests
 
 #### Bug Fixes (During Development)

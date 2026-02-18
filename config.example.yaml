@@ -1,5 +1,44 @@
-# Libvirt connection URI
-# Examples:
-#   qemu:///system              - local system connection (default)
-#   qemu+ssh://user@host/system - remote connection over SSH
-libvirt_uri: "qemu:///system"
+# =============================================================================
+# Ansible Deployer Configuration
+# =============================================================================
+#
+# Config file search order (first match wins):
+#   1. --config flag
+#   2. ./config.yaml  (current working directory)
+#   3. ./config.yml
+#   4. <project-root>/config.yaml  (if --project-root is set)
+#   5. <project-root>/config.yml
+#   6. ~/.config/ansible-deployer/config.yaml
+#   7. /etc/ansible-deployer/config.yaml
+
+# -----------------------------------------------------------------------------
+# Option 1: Single libvirt host (simplest)
+# -----------------------------------------------------------------------------
+# libvirt_uri: "qemu:///system"
+
+# -----------------------------------------------------------------------------
+# Option 2: Multiple libvirt hosts (named connections)
+# -----------------------------------------------------------------------------
+# Hosts are searched in order during VM allocation. The first matching VM wins.
+# If a host is unreachable, it is skipped with a warning.
+#
+# Auth is handled via the URI itself. Libvirt supports these URI parameters:
+#   keyfile      — path to SSH private key
+#   no_verify    — skip host key verification (1 = yes)
+#   known_hosts  — path to known_hosts file
+#   sshauth      — comma-separated auth methods (agent,privkey,password)
+#
+# See: https://libvirt.org/uri.html
+#
+libvirt_connections:
+  local:
+    uri: "qemu:///system"
+
+  # Example: remote host over SSH with a specific key
+  # remote-server:
+  #   uri: "qemu+ssh://root@10.0.0.5/system?keyfile=/root/.ssh/id_remote"
+  #   network: "mgmt-net"    # optional: preferred network for IP resolution
+
+  # Example: remote host with libssh transport
+  # test-lab:
+  #   uri: "qemu+libssh://admin@10.0.0.10/system?keyfile=/root/.ssh/id_lab&known_hosts_verify=ignore"
