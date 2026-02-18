@@ -470,15 +470,6 @@ class VMManager:
         """
         return list_vm_interfaces(domain)
 
-    def reset_vm(self, domain: libvirt.virDomain) -> None:
-        """Reset VM by running wipefs and rebooting.
-
-        Args:
-            domain: libvirt domain object
-        """
-        # This will be handled by VMResetManager
-        pass
-
     def _get_state_string(self, state: int) -> str:
         """Convert libvirt state constant to string.
 

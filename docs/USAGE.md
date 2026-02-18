@@ -39,18 +39,48 @@ pip install .
 
 ## Configuration
 
-Configuration is primarily done through CLI options. An optional `config.yaml` file can be used for the libvirt connection URI:
+Configuration is primarily done through CLI options. An optional `config.yaml` file configures the libvirt connection(s):
+
+### Single Host (Simple)
 
 ```yaml
-# config.yaml (optional - defaults work without it)
+# config.yaml (optional - defaults to qemu:///system without it)
 libvirt_uri: "qemu:///system"
 ```
 
-The config file is searched in order: `./config.yaml`, `./config.yml`, `/etc/ansible-deployer/config.yaml`. You can also specify a custom location:
+### Multiple Hosts
+
+Search for VMs across multiple libvirt hypervisors. Hosts are searched in config order during allocation; unreachable hosts are skipped with a warning:
+
+```yaml
+libvirt_connections:
+  local:
+    uri: "qemu:///system"
+  remote-server:
+    uri: "qemu+ssh://root@10.0.0.5/system?keyfile=/root/.ssh/id_rsa"
+    network: "mgmt-net"    # optional: preferred network for IP resolution
+```
+
+Auth is encoded in the URI itself (SSH keys, host verification, etc.) — see [libvirt URI docs](https://libvirt.org/uri.html). When both `libvirt_uri` and `libvirt_connections` are present, `libvirt_connections` takes precedence.
+
+### Config File Search Order
+
+Config files are searched in order (first match wins):
+
+1. `./config.yaml` (current working directory)
+2. `./config.yml`
+3. `<project-root>/config.yaml` (if `--project-root` is set)
+4. `<project-root>/config.yml`
+5. `~/.config/ansible-deployer/config.yaml`
+6. `/etc/ansible-deployer/config.yaml`
+
+You can also specify an explicit path:
 
 ```bash
 ansible-deployer --config /path/to/config.yaml <command>
 ```
+
+### CLI Options
 
 All other settings are CLI options:
 
@@ -61,12 +91,6 @@ ansible-deployer \
   --project-root ~/my-project \      # Base directory for relative paths
   -v \                               # Shorthand for --log-level DEBUG
   deploy --network my-network ...    # Network for IP discovery (default: first interface)
-```
-
-For remote libvirt hosts, set `libvirt_uri` in the config file:
-
-```yaml
-libvirt_uri: "qemu+ssh://user@remote-host/system"
 ```
 
 ## Preparing VMs
@@ -904,7 +928,7 @@ deploy:
 
 ### Custom Libvirt URI
 
-For remote libvirt hosts:
+For a single remote libvirt host:
 
 ```bash
 ansible-deployer --config custom.yaml deploy \
@@ -916,6 +940,25 @@ In `custom.yaml`:
 ```yaml
 libvirt_uri: "qemu+ssh://user@remote-host/system"
 ```
+
+### Multi-Host Allocation
+
+Search for VMs across multiple hypervisors. The first matching VM wins, and unreachable hosts are skipped:
+
+```yaml
+# config.yaml
+libvirt_connections:
+  lab-server-1:
+    uri: "qemu+ssh://root@10.0.0.5/system?keyfile=/root/.ssh/id_lab"
+    network: "mgmt-net"
+  lab-server-2:
+    uri: "qemu+ssh://root@10.0.0.6/system?keyfile=/root/.ssh/id_lab"
+    network: "mgmt-net"
+  local:
+    uri: "qemu:///system"
+```
+
+The `list-vms` command shows a `Host` column when multiple hosts are configured. See `config.example.yaml` for more examples and URI auth parameters.
 
 ### Parallel Deployments
 

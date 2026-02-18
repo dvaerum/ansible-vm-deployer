@@ -479,12 +479,27 @@ Environment variables are also available inside your Ansible playbooks:
 Create `config.yaml` in your project directory (optional — defaults work out of the box):
 
 ```yaml
-# Only libvirt_uri is configured in the file.
-# All other settings are CLI options.
+# Simple: single local host (this is the default even without a config file)
 libvirt_uri: "qemu:///system"
 ```
 
-Other settings are now CLI options:
+For **multiple libvirt hosts**, use named connections — VMs are searched across all hosts during allocation:
+
+```yaml
+# Multi-host: search VMs across multiple libvirt hypervisors
+libvirt_connections:
+  local:
+    uri: "qemu:///system"
+  remote-server:
+    uri: "qemu+ssh://root@10.0.0.5/system?keyfile=/root/.ssh/id_rsa"
+    network: "mgmt-net"  # optional: preferred network for IP resolution on this host
+```
+
+Hosts are searched in config order. Unreachable hosts are skipped with a warning. Auth parameters (SSH keys, host verification) are encoded in the URI — see [libvirt URI docs](https://libvirt.org/uri.html).
+
+Config file search order: `./config.yaml` → `./config.yml` → `<project-root>/config.yaml` → `~/.config/ansible-deployer/config.yaml` → `/etc/ansible-deployer/config.yaml`
+
+Other settings are CLI options:
 - `--log-dir` — Log directory (default: `./logs`)
 - `--log-level` — Log verbosity: `debug`, `info`, `warning`, `error` (default: `info`)
 - `--network` — Libvirt network for IP resolution (deploy subcommand)

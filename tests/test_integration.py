@@ -434,5 +434,357 @@ def test_vm_manager_list_vms_includes_host_key():
     assert vms[0]["name"] == "test-vm-1"
 
 
+# ---------------------------------------------------------------------------
+# VMManager: multi-host get_vm_by_name (fall-through)
+# ---------------------------------------------------------------------------
+
+def test_vm_manager_get_vm_by_name_falls_through_hosts():
+    """get_vm_by_name searches second host when first raises libvirtError."""
+    from ansible_deployer.vm_manager import VMManager
+    from ansible_deployer.config import LibvirtConnectionConfig
+    import libvirt
+
+    # host1 doesn't have the VM, host2 does
+    target_domain = Mock()
+    target_domain.name.return_value = "my-vm"
+
+    mock_conn1 = Mock()
+    mock_conn1.lookupByName.side_effect = libvirt.libvirtError("Not found")
+    mock_conn2 = Mock()
+    mock_conn2.lookupByName.return_value = target_domain
+
+    cfg1 = LibvirtConnectionConfig(uri="qemu:///system")
+    cfg2 = LibvirtConnectionConfig(uri="qemu+ssh://host2/system")
+    mgr = VMManager(connections={"host1": cfg1, "host2": cfg2})
+    mgr._connections = {"host1": mock_conn1, "host2": mock_conn2}
+    mgr._connected_configs = {"host1": cfg1, "host2": cfg2}
+
+    result = mgr.get_vm_by_name("my-vm")
+    assert result is target_domain
+    mock_conn1.lookupByName.assert_called_once_with("my-vm")
+    mock_conn2.lookupByName.assert_called_once_with("my-vm")
+
+
+def test_vm_manager_get_vm_by_name_not_found_multi_host():
+    """get_vm_by_name raises VMNotFoundException when no host has the VM."""
+    from ansible_deployer.vm_manager import VMManager, VMNotFoundException
+    from ansible_deployer.config import LibvirtConnectionConfig
+    import libvirt
+
+    mock_conn1 = Mock()
+    mock_conn1.lookupByName.side_effect = libvirt.libvirtError("Not found")
+    mock_conn2 = Mock()
+    mock_conn2.lookupByName.side_effect = libvirt.libvirtError("Not found")
+
+    cfg1 = LibvirtConnectionConfig(uri="qemu:///system")
+    cfg2 = LibvirtConnectionConfig(uri="qemu+ssh://host2/system")
+    mgr = VMManager(connections={"host1": cfg1, "host2": cfg2})
+    mgr._connections = {"host1": mock_conn1, "host2": mock_conn2}
+    mgr._connected_configs = {"host1": cfg1, "host2": cfg2}
+
+    with pytest.raises(VMNotFoundException, match="not found on any"):
+        mgr.get_vm_by_name("missing-vm")
+
+
+# ---------------------------------------------------------------------------
+# VMManager: list_vms across multiple hosts
+# ---------------------------------------------------------------------------
+
+def test_vm_manager_list_vms_multi_host():
+    """list_vms returns VMs from all hosts with correct host keys."""
+    from ansible_deployer.vm_manager import VMManager
+    from ansible_deployer.config import LibvirtConnectionConfig
+    from tests.conftest import make_mock_domain, make_mock_conn
+
+    d1 = make_mock_domain(name="host1-vm", tags=["linux-test"])
+    d2 = make_mock_domain(name="host2-vm-a", tags=["linux-test"])
+    d3 = make_mock_domain(name="host2-vm-b", tags=["other"])
+
+    cfg1 = LibvirtConnectionConfig(uri="qemu:///system")
+    cfg2 = LibvirtConnectionConfig(uri="qemu+ssh://host2/system")
+    mgr = VMManager(connections={"host1": cfg1, "host2": cfg2})
+    mgr._connections = {
+        "host1": make_mock_conn([d1]),
+        "host2": make_mock_conn([d2, d3]),
+    }
+    mgr._connected_configs = {"host1": cfg1, "host2": cfg2}
+
+    vms = mgr.list_vms()
+    assert len(vms) == 3
+
+    # Verify host keys
+    hosts = {vm["name"]: vm["host"] for vm in vms}
+    assert hosts["host1-vm"] == "host1"
+    assert hosts["host2-vm-a"] == "host2"
+    assert hosts["host2-vm-b"] == "host2"
+
+    # Verify config-order (host1 first, then host2)
+    names = [vm["name"] for vm in vms]
+    assert names == ["host1-vm", "host2-vm-a", "host2-vm-b"]
+
+
+# ---------------------------------------------------------------------------
+# VMManager: tag operations via domain.connect()
+# ---------------------------------------------------------------------------
+
+def test_add_vm_tag_uses_domain_connect():
+    """add_vm_tag calls domain.connect() to get the right connection."""
+    from ansible_deployer.vm_manager import VMManager
+    from ansible_deployer.config import LibvirtConnectionConfig
+
+    mock_conn = Mock()
+    mock_domain = Mock()
+    mock_domain.connect.return_value = mock_conn
+
+    cfg = LibvirtConnectionConfig(uri="test:///default")
+    mgr = VMManager(connections={"default": cfg})
+    mgr._connections = {"default": mock_conn}
+    mgr._connected_configs = {"default": cfg}
+
+    with patch("ansible_deployer.vm_manager.vm_ops_add_tag") as mock_add:
+        mgr.add_vm_tag(mock_domain, "my-tag")
+
+        mock_domain.connect.assert_called_once()
+        mock_add.assert_called_once_with(mock_conn, mock_domain, "my-tag")
+
+
+def test_remove_vm_tag_uses_domain_connect():
+    """remove_vm_tag calls domain.connect() to get the right connection."""
+    from ansible_deployer.vm_manager import VMManager
+    from ansible_deployer.config import LibvirtConnectionConfig
+
+    mock_conn = Mock()
+    mock_domain = Mock()
+    mock_domain.connect.return_value = mock_conn
+
+    cfg = LibvirtConnectionConfig(uri="test:///default")
+    mgr = VMManager(connections={"default": cfg})
+    mgr._connections = {"default": mock_conn}
+    mgr._connected_configs = {"default": cfg}
+
+    with patch("ansible_deployer.vm_manager.vm_ops_remove_tag") as mock_remove:
+        mgr.remove_vm_tag(mock_domain, "old-tag")
+
+        mock_domain.connect.assert_called_once()
+        mock_remove.assert_called_once_with(mock_conn, mock_domain, "old-tag")
+
+
+# ---------------------------------------------------------------------------
+# VMManager: _get_network_for_domain and get_vm_ip per-host auto-resolve
+# ---------------------------------------------------------------------------
+
+def test_get_vm_ip_auto_resolves_per_host_network():
+    """get_vm_ip(domain) uses per-host network when no explicit network given."""
+    from ansible_deployer.vm_manager import VMManager
+    from ansible_deployer.config import LibvirtConnectionConfig
+
+    mock_conn = Mock()
+    mock_domain = Mock()
+    mock_domain.connect.return_value = mock_conn
+
+    cfg = LibvirtConnectionConfig(uri="qemu+ssh://host/system", network="mgmt-net")
+    mgr = VMManager(connections={"remote": cfg})
+    mgr._connections = {"remote": mock_conn}
+    mgr._connected_configs = {"remote": cfg}
+
+    with patch("ansible_deployer.vm_manager.get_vm_ip", return_value="10.0.0.50") as mock_get_ip:
+        ip = mgr.get_vm_ip(mock_domain)
+
+    assert ip == "10.0.0.50"
+    # Verify the per-host network was passed
+    mock_get_ip.assert_called_once_with(mock_domain, "mgmt-net")
+
+
+def test_get_vm_ip_explicit_network_overrides_per_host():
+    """Explicit network= argument overrides per-host config."""
+    from ansible_deployer.vm_manager import VMManager
+    from ansible_deployer.config import LibvirtConnectionConfig
+
+    mock_conn = Mock()
+    mock_domain = Mock()
+    mock_domain.connect.return_value = mock_conn
+
+    cfg = LibvirtConnectionConfig(uri="qemu+ssh://host/system", network="mgmt-net")
+    mgr = VMManager(connections={"remote": cfg})
+    mgr._connections = {"remote": mock_conn}
+    mgr._connected_configs = {"remote": cfg}
+
+    with patch("ansible_deployer.vm_manager.get_vm_ip", return_value="10.0.0.60") as mock_get_ip:
+        ip = mgr.get_vm_ip(mock_domain, network="custom-net")
+
+    assert ip == "10.0.0.60"
+    mock_get_ip.assert_called_once_with(mock_domain, "custom-net")
+
+
+def test_get_network_for_domain_no_match():
+    """_get_network_for_domain returns None when domain.connect() doesn't match any."""
+    from ansible_deployer.vm_manager import VMManager
+    from ansible_deployer.config import LibvirtConnectionConfig
+
+    mock_conn = Mock()
+    mock_domain = Mock()
+    # domain.connect() returns a DIFFERENT object than what's in _connections
+    mock_domain.connect.return_value = Mock()
+
+    cfg = LibvirtConnectionConfig(uri="test:///default", network="mgmt-net")
+    mgr = VMManager(connections={"default": cfg})
+    mgr._connections = {"default": mock_conn}
+    mgr._connected_configs = {"default": cfg}
+
+    with patch("ansible_deployer.vm_manager.get_vm_ip", return_value="10.0.0.1") as mock_get_ip:
+        mgr.get_vm_ip(mock_domain)
+
+    # network should be None (no match found)
+    mock_get_ip.assert_called_once_with(mock_domain, None)
+
+
+def test_get_network_for_domain_connect_exception():
+    """_get_network_for_domain returns None when domain.connect() raises."""
+    from ansible_deployer.vm_manager import VMManager
+    from ansible_deployer.config import LibvirtConnectionConfig
+
+    mock_conn = Mock()
+    mock_domain = Mock()
+    mock_domain.connect.side_effect = Exception("connection lost")
+
+    cfg = LibvirtConnectionConfig(uri="test:///default", network="mgmt-net")
+    mgr = VMManager(connections={"default": cfg})
+    mgr._connections = {"default": mock_conn}
+    mgr._connected_configs = {"default": cfg}
+
+    with patch("ansible_deployer.vm_manager.get_vm_ip", return_value="10.0.0.1") as mock_get_ip:
+        mgr.get_vm_ip(mock_domain)
+
+    # network should be None (exception path)
+    mock_get_ip.assert_called_once_with(mock_domain, None)
+
+
+def test_get_vm_ip_no_per_host_network_passes_none():
+    """When per-host network is not configured, get_vm_ip passes None."""
+    from ansible_deployer.vm_manager import VMManager
+    from ansible_deployer.config import LibvirtConnectionConfig
+
+    mock_conn = Mock()
+    mock_domain = Mock()
+    mock_domain.connect.return_value = mock_conn
+
+    # No network configured for this host
+    cfg = LibvirtConnectionConfig(uri="qemu:///system")
+    mgr = VMManager(connections={"local": cfg})
+    mgr._connections = {"local": mock_conn}
+    mgr._connected_configs = {"local": cfg}
+
+    with patch("ansible_deployer.vm_manager.get_vm_ip", return_value="192.168.1.5") as mock_get_ip:
+        ip = mgr.get_vm_ip(mock_domain)
+
+    assert ip == "192.168.1.5"
+    mock_get_ip.assert_called_once_with(mock_domain, None)
+
+
+# ---------------------------------------------------------------------------
+# VMManager: _iter_domains error handling
+# ---------------------------------------------------------------------------
+
+def test_iter_domains_skips_host_on_list_error():
+    """_iter_domains logs and skips a host when listAllDomains raises."""
+    from ansible_deployer.vm_manager import VMManager
+    from ansible_deployer.config import LibvirtConnectionConfig
+    from tests.conftest import make_mock_domain
+    import libvirt
+
+    d_good = make_mock_domain(name="good-vm", tags=["linux-test"])
+
+    mock_conn_bad = Mock()
+    mock_conn_bad.listAllDomains.side_effect = libvirt.libvirtError("host unreachable")
+
+    mock_conn_good = Mock()
+    mock_conn_good.listAllDomains.return_value = [d_good]
+
+    cfg1 = LibvirtConnectionConfig(uri="qemu+ssh://bad/system")
+    cfg2 = LibvirtConnectionConfig(uri="qemu:///system")
+    mgr = VMManager(connections={"bad": cfg1, "good": cfg2})
+    mgr._connections = {"bad": mock_conn_bad, "good": mock_conn_good}
+    mgr._connected_configs = {"bad": cfg1, "good": cfg2}
+
+    result = mgr._iter_domains()
+    assert len(result) == 1
+    assert result[0] == ("good", d_good)
+
+
+# ---------------------------------------------------------------------------
+# VMManager: _raise_connection_error branches
+# ---------------------------------------------------------------------------
+
+def test_raise_connection_error_refused():
+    """_raise_connection_error 'refused' branch mentions libvirtd."""
+    from ansible_deployer.vm_manager import VMManager
+
+    original = Exception("Connection refused by host")
+    with pytest.raises(RuntimeError, match="libvirtd service is not running"):
+        VMManager._raise_connection_error("qemu:///system", "Connection refused by host", original)
+
+
+def test_raise_connection_error_failed_to_connect():
+    """_raise_connection_error 'failed to connect' branch mentions firewall."""
+    from ansible_deployer.vm_manager import VMManager
+
+    original = Exception("Failed to connect socket")
+    with pytest.raises(RuntimeError, match="Firewall blocking"):
+        VMManager._raise_connection_error("qemu+ssh://host/system", "Failed to connect socket", original)
+
+
+def test_raise_connection_error_generic():
+    """_raise_connection_error generic branch includes URI and error."""
+    from ansible_deployer.vm_manager import VMManager
+
+    original = Exception("Unexpected internal error")
+    with pytest.raises(RuntimeError, match="qemu:///system") as exc_info:
+        VMManager._raise_connection_error("qemu:///system", "Unexpected internal error", original)
+    assert "Unexpected internal error" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Config: save/load round-trip with multi-host
+# ---------------------------------------------------------------------------
+
+def test_config_save_load_multihost_roundtrip(tmp_path):
+    """Config with libvirt_connections survives save() + load() round-trip."""
+    from ansible_deployer.config import Config, LibvirtConnectionConfig
+
+    config_file = tmp_path / "config.yaml"
+
+    original = Config(libvirt_connections={
+        "local": LibvirtConnectionConfig(uri="qemu:///system"),
+        "remote": LibvirtConnectionConfig(
+            uri="qemu+ssh://root@10.0.0.5/system",
+            network="mgmt-net",
+        ),
+    })
+    original.save(config_file)
+
+    loaded = Config.load(config_file)
+    conns = loaded.get_connections()
+    assert "local" in conns
+    assert "remote" in conns
+    assert conns["local"].uri == "qemu:///system"
+    assert conns["remote"].uri == "qemu+ssh://root@10.0.0.5/system"
+    assert conns["remote"].network == "mgmt-net"
+
+
+def test_config_save_load_legacy_uri_roundtrip(tmp_path):
+    """Legacy libvirt_uri survives save() + load() round-trip."""
+    from ansible_deployer.config import Config
+
+    config_file = tmp_path / "config.yaml"
+
+    original = Config(libvirt_uri="qemu+ssh://test/system")
+    original.save(config_file)
+
+    loaded = Config.load(config_file)
+    assert loaded.libvirt_uri == "qemu+ssh://test/system"
+    conns = loaded.get_connections()
+    assert conns["default"].uri == "qemu+ssh://test/system"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

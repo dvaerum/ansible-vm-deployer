@@ -8,23 +8,39 @@ You can select networks by their **libvirt network name** (e.g., `mgmt-network`)
 
 ## Configuration
 
-### Method 1: Global Configuration (config.yaml)
+### Method 1: Per-Host Configuration (multi-host config)
+
+When using `libvirt_connections` (multi-host setup), each host can have its own preferred network for IP resolution:
+
+```yaml
+libvirt_connections:
+  local:
+    uri: "qemu:///system"
+    # No network set — uses default behavior (first interface with IP)
+  remote-server:
+    uri: "qemu+ssh://root@10.0.0.5/system"
+    network: "mgmt-net"    # VMs on this host resolve IPs via mgmt-net
+```
+
+This is useful when different hypervisors have different network topologies. The per-host network is used automatically when `get_vm_ip()` is called without an explicit `--network` flag.
+
+### Method 2: Global Configuration (config.yaml)
 
 ```yaml
 # Set default network for all deployments
 network: "mgmt-network"  # or null to use first interface
 ```
 
-### Method 2: Per-Deployment CLI Flag
+### Method 3: Per-Deployment CLI Flag
 
 ```bash
 # Override default and use specific network
 ansible-deployer deploy --tag test --playbook deploy.yml --network mgmt-network
 ```
 
-### Method 3: Default Behavior (No Configuration)
+### Method 4: Default Behavior (No Configuration)
 
-If no network/interface is specified (both config and CLI), the tool will:
+If no network/interface is specified (neither per-host config, global config, nor CLI), the tool will:
 1. Try ARP table, QEMU guest agent, then DHCP leases
 2. Return the **first interface with an IPv4 address**
 
@@ -58,7 +74,7 @@ The tool tries multiple sources in order:
 ### Selection Priority
 
 ```
-CLI --network flag  >  config.yaml network  >  first interface with IP
+CLI --network flag  >  per-host network (libvirt_connections)  >  config.yaml network  >  first interface with IP
 ```
 
 ## Use Cases
