@@ -183,7 +183,8 @@ def test_vm_manager_context_manager():
             assert len(vm_mgr._connections) == 1
             assert "default" in vm_mgr._connections
         
-        # After exit, connections should be closed and cleared
+        # Verify correct URI was used and connection was closed
+        mock_libvirt.open.assert_called_once_with("test:///default")
         mock_conn.close.assert_called_once()
         assert vm_mgr._connections == {}
 
