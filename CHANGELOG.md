@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Fix: Loopback IPs returned by `get_vm_ip()`** — The shared `get_vm_ip()` in `vm_tools_common` now filters out `127.*` loopback addresses, returning `None` instead. Previously, loopback filtering was only in the vm-manager, so ansible-deployer would pass `127.0.0.1` to Ansible (causing SSH-to-localhost failures). Both tools now benefit from the shared filter.
 
+### Fixed - Ansible Deployer (Critical Review)
+
+- **Fix: `_loaded_from` leaks into saved config** — Pydantic v2 with `extra="allow"` intercepts `__setattr__`, so `instance._loaded_from = path` stored it as an extra field that leaked into `model_dump()` and thus `save()` output. Fixed by using `object.__setattr__()` to bypass Pydantic.
+- **Fix: `connect()` handle leak** — Calling `connect()` when already connected cleared `_connections` without closing existing handles. Fixed to call `disconnect()` first to prevent leaking `virConnect` handles.
+- **Fix: CLI cleanup uses stale domains** — The `finally` block in the `deploy` command ran after the `with vm_manager:` context exited (connections closed), then used stale domain objects tied to the old closed connection. `domain.connect()` would return the closed connection handle. Fixed by restructuring cleanup to use a single fresh connection and re-lookup domains by name.
+
+### Changed - Test Suite
+
+- **Test quality improvements** — Added URI assertion to context manager test (verifies `libvirt.open` called with correct URI), added regression test for the `connect()` handle leak fix (verifies first connection is closed before second is opened), removed 2 duplicate tests from `test_vm_manager.py` that were identical to tests in `test_integration.py`. Total: 383 tests (209 shared/deployer + 174 vm-manager), 100% pass rate.
+
 ### Fixed - VM Manager (Critical Review)
 
 - **Fix: Retry loop holds tracker slot** — When `_run_on_broken_script` ran inside `_monitor_vm`, it held the vm_tracker session. If the script restarted the VM, the new start event was debounced (tracker occupied) AND auto-excluded (broken tag). After script success, the VM was stranded with stale tags. Now `_monitor_vm` frees the tracker slot before running the on-broken script, and on successful repair, removes the broken tag and triggers fresh SSH monitoring via `handle_vm_started()`.
@@ -209,19 +219,22 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
   - Troubleshooting guide
 
 #### Test Suite
-- **346 comprehensive unit tests** covering all 7 race condition fixes, broken tag feature, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), repair flow, CancelledError handling, and stale tag scanning:
+- **383 comprehensive unit tests** covering multi-host libvirt connections, all 7 race condition fixes, broken tag feature, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), repair flow, CancelledError handling, and stale tag scanning:
   - `tests/conftest.py`: Shared fixtures (`make_mock_domain()`, `make_mock_conn()`)
-  - `tests/test_tag_filters.py`: 14 tests (`vm_matches_tags()` — required/exclude tags)
+  - `tests/test_integration.py`: 45 tests (config, VMManager multi-host, executor, metadata, workflow)
+  - `tests/test_allocate_vms.py`: 43 tests (VM allocation, multi-host allocation, auto-exclude broken)
   - `tests/test_vm_operations.py`: 45 tests (tag CRUD, IP resolution, state strings)
   - `tests/test_metadata_manager.py`: 41 tests (MetadataManager get/set/claim/clear)
-  - `tests/test_allocate_vms.py`: 37 tests (VM allocation with auto-exclude broken)
+  - `tests/test_log_prefix.py`: 20 tests (prefix sanitization, subdirectory creation, repeat suffixes)
+  - `tests/test_tag_filters.py`: 14 tests (`vm_matches_tags()` — required/exclude tags)
+  - `tests/test_vm_manager.py`: 1 test (connect() handle leak regression)
   - `tests/vm_manager/test_daemon.py`: 70 tests (event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag, on-broken timeout/retries/delay init)
   - `tests/vm_manager/test_tag_cleaner.py`: 59 tests (tag removal orchestration, race conditions #3/#6/#7, broken tagging, in_use check, on-broken script hook, retry logic, configurable timeout, return values, repair flow, CancelledError handling)
   - `tests/vm_manager/test_ssh_checker.py`: 23 tests (uptime verification, string return values)
   - `tests/vm_manager/test_event_monitor.py`: 15 tests (reboot callback registration)
   - `tests/vm_manager/test_vm_tracker.py`: 7 tests (session management, debouncing)
 - **8 manual tests**: All scenarios validated with real VMs
-- **100% test pass rate**: 367/367 total tests
+- **100% test pass rate**: 383/383 total tests
 - **Mocked dependencies**: No real VMs or libvirt connection needed for unit tests
 
 #### Bug Fixes (During Development)

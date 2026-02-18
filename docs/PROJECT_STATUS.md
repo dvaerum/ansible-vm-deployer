@@ -17,7 +17,7 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 **Purpose:** Deploy Ansible playbooks to ephemeral VMs with automatic cleanup.
 
 **Maturity:** Stable, production-ready  
-**Test Coverage:** 193 tests, 100% pass rate  
+**Test Coverage:** 209 tests, 100% pass rate  
 **Documentation:** Complete
 
 **Key Features:**
@@ -76,7 +76,7 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 #### Testing
 - ✅ 174 VM Manager unit tests
 - ✅ 8 manual tests with real VMs
-- ✅ 100% test pass rate (367/367 total)
+- ✅ 100% test pass rate (383/383 total)
 - ✅ Mocked dependencies for isolation
 
 #### Documentation
@@ -98,16 +98,23 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 
 | Component | Lines of Code | Tests | Documentation |
 |-----------|---------------|-------|---------------|
-| Ansible Deployer | ~2,400 | 193 | ~3,000 |
+| Ansible Deployer | ~2,400 | 209 | ~3,000 |
 | VM Manager | ~2,400 | 174 | ~2,625 |
 | Shared Library | ~450 | Covered by both | - |
-| **Total** | **~5,250** | **367** | **5,625+** |
+| **Total** | **~5,250** | **383** | **5,625+** |
 
 ### Test Coverage
 
 ```
-Total Tests: 367/367 (100% pass rate)
-├── Shared/Deployer: 193 tests
+Total Tests: 383/383 (100% pass rate)
+├── Shared/Deployer: 209 tests
+│   ├── test_allocate_vms.py: 43 tests (allocation, multi-host allocation, auto-exclude broken)
+│   ├── test_integration.py: 45 tests (config, VMManager multi-host, executor, metadata, workflow)
+│   ├── test_vm_operations.py: 45 tests (tag CRUD, IP resolution, state strings)
+│   ├── test_metadata_manager.py: 41 tests (get/set/claim/clear metadata)
+│   ├── test_log_prefix.py: 20 tests (prefix sanitization, subdirectory creation, repeat suffixes)
+│   ├── test_tag_filters.py: 14 tests (required/exclude tag matching)
+│   └── test_vm_manager.py: 1 test (connect() handle leak regression)
 └── VM Manager: 174 tests
     ├── test_daemon.py: 70 tests
     ├── test_tag_cleaner.py: 59 tests
@@ -423,7 +430,7 @@ Dennis Vestergaard Værum (github@varum.dk)
 
 **Project Quality Metrics:**
 
-- ✅ 100% test pass rate (367/367 tests)
+- ✅ 100% test pass rate (383/383 tests)
 - ✅ Comprehensive documentation (5,625+ lines)
 - ✅ Production-ready code quality
 - ✅ Professional project structure

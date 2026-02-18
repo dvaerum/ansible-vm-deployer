@@ -459,7 +459,7 @@ Environment variables are also available inside your Ansible playbooks:
 │   ├── vm-manager.nix         # NixOS module
 │   ├── example-configuration.nix # Configuration examples
 │   └── README.md              # Module documentation
-├── tests/                     # Test suite (346 tests)
+├── tests/                     # Test suite (383 tests)
 │   ├── conftest.py            # Shared test fixtures
 │   ├── test_*.py              # Common tests (tag filters, VM ops, allocation)
 │   ├── ansible_deployer/      # Ansible Deployer tests
@@ -533,8 +533,8 @@ mypy src/
 
 ### Test Suite
 
-**346 total tests (100% pass rate):**
-- Comprehensive coverage of all 7 race condition fixes, broken VM handling, auto-exclude behavior, `--on-broken` script hook (with retry/timeout/repair flow), CancelledError handling, and stale tag scanning
+**383 total tests (100% pass rate):**
+- Comprehensive coverage of multi-host libvirt connections, all 7 race condition fixes, broken VM handling, auto-exclude behavior, `--on-broken` script hook (with retry/timeout/repair flow), CancelledError handling, and stale tag scanning
 - Tests cover: tag filters, VM operations, metadata management, VM allocation, daemon behavior, tag cleaning, SSH checking, event monitoring, and VM tracking
 - **All tests use mocked dependencies** — no real VMs or libvirt connection needed
 

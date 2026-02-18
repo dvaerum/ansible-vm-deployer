@@ -1048,42 +1048,58 @@ pytest tests/ -v
 
 | File | Tests | Coverage |
 |------|-------|----------|
-| `tests/test_integration.py` | 13 tests | Config, AnsibleExecutor, MetadataManager, VMManager, full workflow simulation |
-| `tests/test_vm_manager.py` | 2 tests | VMManager connection and lookup |
+| `tests/test_integration.py` | 45 tests | Config (load/save/search/multi-host), AnsibleExecutor, MetadataManager, VMManager (multi-host connect/list/lookup/tag-ops/network/errors), full workflow |
+| `tests/test_allocate_vms.py` | 43 tests | VM allocation, multi-host allocation, auto-exclude broken tag, find available VMs |
+| `tests/test_vm_operations.py` | 45 tests | Tag CRUD, IP resolution (ARP/agent/lease, loopback filtering), state strings |
+| `tests/test_metadata_manager.py` | 41 tests | MetadataManager get/set/claim/clear, bulk writes, XML namespace handling |
+| `tests/test_log_prefix.py` | 20 tests | Prefix sanitization, subdirectory creation, repeat task ID suffixes |
+| `tests/test_tag_filters.py` | 14 tests | Required/exclude tag matching, broken tag auto-exclude |
+| `tests/test_vm_manager.py` | 1 test | Regression: connect() closes existing connections before reconnect |
+
+**Total shared/deployer tests: 209**
 
 ### Test Categories
 
-#### Config Tests
-- `test_config_defaults` — Verifies `Config()` produces correct defaults (`libvirt_uri: "qemu:///system"`)
+#### Config Tests (test_integration.py)
+- `test_config_defaults` — Verifies `Config()` produces correct defaults
 - `test_config_load_from_dict` — Config from Python dict
 - `test_config_load_from_yaml` — Config from YAML file via `Config.load()`
 - `test_config_save_and_load` — Round-trip: save to YAML, load back, verify equality
+- `test_config_get_connections_from_legacy_uri` — Legacy `libvirt_uri` converted to connections dict
+- `test_config_get_connections_from_multi_host` — Multi-host `libvirt_connections` returned as-is
+- `test_config_get_connections_precedence` — `libvirt_connections` takes precedence over `libvirt_uri`
+- `test_config_loaded_from_*` — Config search order and `loaded_from` property
+- `test_config_load_yaml_with_multi_host` — Multi-host YAML parsing with per-host network
+- `test_config_save_load_multihost_roundtrip` — Multi-host config survives save/load cycle
+- `test_config_loaded_from_does_not_leak_into_save` — Regression test for `_loaded_from` Pydantic leak
 
-**Note:** Config only has one field (`libvirt_uri`) since `log_dir`, `log_level`, `network`, `reset_timeout`, and `ansible_verbose` were moved to CLI options. The `extra = "allow"` Pydantic setting ensures old config files with removed fields still parse without errors.
+**Note:** Config uses `model_config = ConfigDict(extra="allow")` (Pydantic v2). The `_loaded_from` attribute is set via `object.__setattr__()` to bypass Pydantic's extra field interception.
 
-#### AnsibleExecutor Tests
+#### AnsibleExecutor Tests (test_integration.py)
 - `test_ansible_executor_init` — Verifies log directory creation
 - `test_ansible_executor_list_logs_empty` — Empty log directory returns `[]`
 - `test_ansible_executor_list_logs_with_files` — Detects log file pairs (stdout + json) and extracts task IDs
 
-#### MetadataManager Tests (Mocked)
-- `test_metadata_manager_mark_in_use` — Calls `setMetadata()` when marking VM as in use
-- `test_metadata_manager_mark_available` — Calls `setMetadata()` when marking VM as available
+#### MetadataManager Tests (test_metadata_manager.py — 41 tests)
+- Get/set metadata, bulk writes, claim/verify, mark in-use/available, clear, XML namespace handling
 
-These tests mock `domain.metadata()` to raise `libvirt.libvirtError` (simulating no existing metadata), then verify `setMetadata()` is called to write new metadata.
+**Important:** Mocks must raise `libvirt.libvirtError`, not generic `Exception`. The `set_metadata_bulk()` method specifically catches `libvirt.libvirtError` to distinguish "no metadata exists" from actual errors.
 
-**Important:** Mocks must raise `libvirt.libvirtError`, not generic `Exception`. The `set_metadata_bulk()` method specifically catches `libvirt.libvirtError` to distinguish "no metadata exists" from actual errors. A generic `Exception` propagates uncaught and causes test failures.
-
-#### VMManager Tests (Mocked)
-- `test_vm_manager_init` — URI stored, connection initially `None`
-- `test_vm_manager_context_manager` — `__enter__` opens connection, `__exit__` closes it
-- `test_vm_manager_get_vm_by_name_not_found` — `lookupByName` failure raises `VMNotFoundException`
-- `test_connection_context_manager` (test_vm_manager.py) — Same pattern, different mock approach
-- `test_get_vm_by_name_not_found` (test_vm_manager.py) — Same test, uses `libvirt.libvirtError`
+#### VMManager Tests (test_integration.py + test_vm_manager.py)
+- `test_vm_manager_init*` — URI stored, default `qemu:///system`, multi-host connections, rejects string arg
+- `test_vm_manager_context_manager` — Opens/closes connections, verifies correct URI
+- `test_vm_manager_connect_*` — Single-host failure, multi-host partial failure, all-fail
+- `test_vm_manager_get_vm_by_name_*` — Lookup across hosts, falls through hosts, not found
+- `test_vm_manager_list_vms_*` — Includes host key, multi-host listing
+- `test_add_vm_tag_uses_domain_connect` — Tag ops use `domain.connect()` for correct connection
+- `test_get_vm_ip_*` — Per-host network auto-resolution, explicit override, no-match, exception
+- `test_iter_domains_skips_host_on_list_error` — Partial failure resilience
+- `test_raise_connection_error_*` — All 3 error branches (auth, refused, generic)
+- `test_connect_closes_existing_connections_before_reconnect` — Regression for handle leak fix
 
 **Important:** When mocking `lookupByName`, the `side_effect` must be `libvirt.libvirtError`, not `Exception`. The `get_vm_by_name()` method catches `libvirt.libvirtError` specifically.
 
-#### Integration-Like Tests
+#### Integration-Like Tests (test_integration.py)
 - `test_full_workflow_simulation` — Creates Config + AnsibleExecutor, verifies directory creation and empty log list
 
 ### Mocking Patterns
