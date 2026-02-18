@@ -786,5 +786,27 @@ def test_config_save_load_legacy_uri_roundtrip(tmp_path):
     assert conns["default"].uri == "qemu+ssh://test/system"
 
 
+def test_config_loaded_from_does_not_leak_into_save(tmp_path):
+    """_loaded_from must not appear in save() output (regression test)."""
+    from ansible_deployer.config import Config
+    import yaml
+
+    # Create a config file, load it (sets _loaded_from), then save to a new file
+    src = tmp_path / "src.yaml"
+    src.write_text("libvirt_uri: 'test:///default'\n")
+
+    config = Config.load(src)
+    assert config.loaded_from == src
+
+    dst = tmp_path / "dst.yaml"
+    config.save(dst)
+
+    # The saved file must NOT contain _loaded_from
+    with open(dst) as f:
+        saved_data = yaml.safe_load(f)
+    assert "_loaded_from" not in saved_data
+    assert saved_data == {"libvirt_uri": "test:///default"}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -127,7 +127,9 @@ class Config(BaseModel):
             data = yaml.safe_load(f)
 
         instance = cls(**data if data else {})
-        instance._loaded_from = loaded_from  # type: ignore[attr-defined]
+        # Bypass Pydantic's __setattr__ to avoid storing this as an extra field
+        # (which would leak into model_dump() and thus into save() output).
+        object.__setattr__(instance, "_loaded_from", loaded_from)
         return instance
 
     @property

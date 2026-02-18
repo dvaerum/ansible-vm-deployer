@@ -391,32 +391,48 @@ def deploy(
         logging.exception("Deployment error")
         sys.exit(1)
     finally:
-        # Always reset VMs and mark as available (unless --no-reset)
+        # Always reset VMs and mark as available (unless --no-reset).
+        # The original connection is closed at this point, so we open a
+        # single fresh connection and re-lookup domains by name to get
+        # valid domain handles.
         if domains:
-            console.print(f"[yellow]Cleaning up {len(domains)} VM(s)...[/yellow]")
-            for domain in domains:
-                metadata_mgr = MetadataManager(domain)
-                try:
-                    if not no_reset:
-                        console.print(f"[yellow]Resetting VM: {domain.name()}...[/yellow]")
-                        with vm_manager:
-                            reset_manager.reset_vm(domain)
-                        console.print(f"[green]VM {domain.name()} reset complete[/green]")
-                    
-                    # Remove usage tag if --mark-available was specified
-                    if mark_available and mark_in_use_tag:
-                        with vm_manager:
-                            vm_manager.remove_vm_tag(domain, mark_in_use_tag)
-                        console.print(f"  [dim]Removed tag '{mark_in_use_tag}' from VM description[/dim]")
-                    
-                    # Mark VM as available
-                    metadata_mgr.mark_available()
-                    console.print(f"[green]VM {domain.name()} marked as available[/green]")
-                    
-                except VMResetError as e:
-                    console.print(f"[bold red]Failed to reset VM {domain.name()}: {e}[/bold red]")
-                    # Still mark as available
-                    metadata_mgr.mark_available()
+            # Collect names while the old domain objects are still usable
+            # (name() reads cached data, doesn't need the connection).
+            domain_names = [d.name() for d in domains]
+            console.print(f"[yellow]Cleaning up {len(domain_names)} VM(s)...[/yellow]")
+
+            try:
+                with vm_manager:
+                    for vm_name in domain_names:
+                        try:
+                            domain = vm_manager.get_vm_by_name(vm_name)
+                        except VMNotFoundException:
+                            console.print(f"[bold red]VM {vm_name} not found during cleanup (skipping)[/bold red]")
+                            continue
+
+                        metadata_mgr = MetadataManager(domain)
+                        try:
+                            if not no_reset:
+                                console.print(f"[yellow]Resetting VM: {vm_name}...[/yellow]")
+                                reset_manager.reset_vm(domain)
+                                console.print(f"[green]VM {vm_name} reset complete[/green]")
+
+                            # Remove usage tag if --mark-available was specified
+                            if mark_available and mark_in_use_tag:
+                                vm_manager.remove_vm_tag(domain, mark_in_use_tag)
+                                console.print(f"  [dim]Removed tag '{mark_in_use_tag}' from VM description[/dim]")
+
+                            # Mark VM as available
+                            metadata_mgr.mark_available()
+                            console.print(f"[green]VM {vm_name} marked as available[/green]")
+
+                        except VMResetError as e:
+                            console.print(f"[bold red]Failed to reset VM {vm_name}: {e}[/bold red]")
+                            # Still mark as available
+                            metadata_mgr.mark_available()
+            except RuntimeError as e:
+                console.print(f"[bold red]Could not reconnect for cleanup: {e}[/bold red]")
+                console.print("[yellow]VMs may still be marked as in-use. Manual cleanup may be needed.[/yellow]")
     
     if not success:
         sys.exit(1)

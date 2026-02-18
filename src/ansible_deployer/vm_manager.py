@@ -92,12 +92,14 @@ class VMManager:
         """Open connections to all configured libvirt hosts.
 
         Unreachable hosts are logged as warnings and skipped.
+        If already connected, existing connections are closed first.
 
         Raises:
             RuntimeError: If *no* host could be reached at all.
         """
-        self._connections.clear()
-        self._connected_configs.clear()
+        # Close any existing connections to avoid leaking handles
+        if self._connections:
+            self.disconnect()
 
         for name, cfg in self._connection_configs.items():
             try:
