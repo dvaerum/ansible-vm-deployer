@@ -59,6 +59,7 @@ def make_mock_domain(
     domain.name.return_value = name
     domain.UUIDString.return_value = uuid
     domain.state.return_value = [state, 0]
+    domain.isActive.return_value = (state == libvirt.VIR_DOMAIN_RUNNING)
 
     # Build description from tags
     description = "tags: " + ", ".join(tags) if tags else ""
@@ -70,17 +71,30 @@ def make_mock_domain(
     )
     domain.XMLDesc.return_value = xml
 
-    # Metadata handling
-    if in_use or task_id or started_at:
-        metadata_xml = SAMPLE_METADATA_XML.format(
+    # Metadata handling — supports both DESCRIPTION and ELEMENT types.
+    # VIR_DOMAIN_METADATA_DESCRIPTION (0): returns the tags description string
+    # VIR_DOMAIN_METADATA_ELEMENT (2): returns the avm custom metadata XML
+    has_element_metadata = bool(in_use or task_id or started_at)
+    element_metadata_xml = None
+    if has_element_metadata:
+        element_metadata_xml = SAMPLE_METADATA_XML.format(
             in_use="true" if in_use else "false",
             task_id=task_id,
             started_at=started_at,
         )
-        domain.metadata.return_value = metadata_xml
-    else:
-        domain.metadata.side_effect = libvirt.libvirtError("No metadata")
 
+    def _metadata_side_effect(type_val, uri, flags=0):
+        if type_val == libvirt.VIR_DOMAIN_METADATA_DESCRIPTION:
+            if description:
+                return description
+            raise libvirt.libvirtError("No domain metadata")
+        if type_val == libvirt.VIR_DOMAIN_METADATA_ELEMENT:
+            if element_metadata_xml:
+                return element_metadata_xml
+            raise libvirt.libvirtError("No metadata")
+        raise libvirt.libvirtError("No metadata")
+
+    domain.metadata.side_effect = _metadata_side_effect
     domain.setMetadata.return_value = None
     domain.create.return_value = 0
 

@@ -46,10 +46,29 @@ def _domain_xml(description=None, name="test-vm", network="mgmt-network", target
     )
 
 
-def _make_domain(xml):
-    """Create a Mock domain whose XMLDesc() returns *xml* for any flags."""
+def _make_domain(xml, description=None, is_active=True):
+    """Create a Mock domain whose XMLDesc() returns *xml* for any flags.
+
+    The mock also configures the metadata API so that
+    ``_get_description()`` works correctly:
+    - ``domain.metadata(VIR_DOMAIN_METADATA_DESCRIPTION, ...)`` returns the
+      description string (or raises ``libvirtError`` if None).
+    - ``domain.setMetadata(...)`` is a no-op Mock.
+    - ``domain.isActive()`` returns *is_active*.
+    """
     domain = Mock(spec=libvirt.virDomain)
     domain.XMLDesc.return_value = xml
+    domain.isActive.return_value = is_active
+    domain.setMetadata.return_value = None
+
+    def _metadata_side_effect(type_val, uri, flags=0):
+        if type_val == libvirt.VIR_DOMAIN_METADATA_DESCRIPTION:
+            if description is not None:
+                return description
+            raise libvirt.libvirtError("No domain metadata")
+        raise libvirt.libvirtError("No domain metadata")
+
+    domain.metadata.side_effect = _metadata_side_effect
     return domain
 
 
@@ -61,16 +80,18 @@ class TestGetVmTags:
     """Parsing tags from the <description> element of domain XML."""
 
     def test_single_tag(self):
-        domain = _make_domain(_domain_xml("tags: linux-test"))
+        domain = _make_domain(_domain_xml("tags: linux-test"), description="tags: linux-test")
         assert get_vm_tags(domain) == ["linux-test"]
 
     def test_multiple_tags(self):
-        domain = _make_domain(_domain_xml("tags: linux-test, linux-test-v1, used"))
+        desc = "tags: linux-test, linux-test-v1, used"
+        domain = _make_domain(_domain_xml(desc), description=desc)
         assert get_vm_tags(domain) == ["linux-test", "linux-test-v1", "used"]
 
     def test_no_tags_line(self):
         """Description exists but contains no 'tags:' prefix."""
-        domain = _make_domain(_domain_xml("This VM is for integration tests"))
+        desc = "This VM is for integration tests"
+        domain = _make_domain(_domain_xml(desc), description=desc)
         assert get_vm_tags(domain) == []
 
     def test_no_description_element(self):
@@ -80,29 +101,43 @@ class TestGetVmTags:
 
     def test_empty_description(self):
         """<description></description> with empty text."""
-        domain = _make_domain(_domain_xml(""))
+        domain = _make_domain(_domain_xml(""), description="")
         assert get_vm_tags(domain) == []
 
     def test_tags_with_extra_whitespace(self):
         """Tags with irregular spacing should still be parsed correctly."""
-        domain = _make_domain(_domain_xml("tags:  alpha ,  beta  ,gamma"))
+        desc = "tags:  alpha ,  beta  ,gamma"
+        domain = _make_domain(_domain_xml(desc), description=desc)
         assert get_vm_tags(domain) == ["alpha", "beta", "gamma"]
 
     def test_tags_line_after_other_text(self):
         """Multiline description where tags appear on a later line."""
         desc = "Some notes about this VM\ntags: web-server, production"
-        domain = _make_domain(_domain_xml(desc))
+        domain = _make_domain(_domain_xml(desc), description=desc)
         assert get_vm_tags(domain) == ["web-server", "production"]
 
     def test_tags_empty_after_colon(self):
         """'tags: ' with nothing after it should yield empty list."""
-        domain = _make_domain(_domain_xml("tags: "))
+        domain = _make_domain(_domain_xml("tags: "), description="tags: ")
         assert get_vm_tags(domain) == []
 
-    def test_uses_inactive_xml_flag(self):
-        """get_vm_tags must request XML with VIR_DOMAIN_XML_INACTIVE."""
-        domain = _make_domain(_domain_xml("tags: a"))
+    def test_metadata_api_used_first(self):
+        """get_vm_tags should use the metadata API (not XMLDesc) when available."""
+        domain = _make_domain(_domain_xml("tags: a"), description="tags: a")
         get_vm_tags(domain)
+        # metadata() is called first; XMLDesc should NOT be called when metadata succeeds
+        domain.metadata.assert_called_once_with(
+            libvirt.VIR_DOMAIN_METADATA_DESCRIPTION,
+            None,
+            libvirt.VIR_DOMAIN_AFFECT_CONFIG,
+        )
+        domain.XMLDesc.assert_not_called()
+
+    def test_falls_back_to_xml_when_metadata_fails(self):
+        """When the metadata API raises, fall back to XMLDesc parsing."""
+        domain = _make_domain(_domain_xml("tags: fallback"))  # no description= → metadata raises
+        assert get_vm_tags(domain) == ["fallback"]
+        # XMLDesc should be called as fallback
         domain.XMLDesc.assert_called_once_with(libvirt.VIR_DOMAIN_XML_INACTIVE)
 
     def test_uses_conftest_helper(self):
@@ -120,71 +155,98 @@ class TestGetVmTags:
 # ===========================================================================
 
 class TestAddVmTag:
-    """Adding tags via description XML update."""
+    """Adding tags via setMetadata API."""
 
     def test_add_new_tag(self):
-        """Adding a tag not yet present should update XML and call defineXML."""
-        domain = _make_domain(_domain_xml("tags: existing"))
+        """Adding a tag not yet present should call setMetadata with updated description."""
+        domain = _make_domain(_domain_xml("tags: existing"), description="tags: existing")
         conn = make_mock_conn()
 
         add_vm_tag(conn, domain, "new-tag")
 
-        conn.defineXML.assert_called_once()
-        new_xml = conn.defineXML.call_args[0][0]
-        assert "existing" in new_xml
-        assert "new-tag" in new_xml
+        domain.setMetadata.assert_called_once()
+        new_desc = domain.setMetadata.call_args[0][1]
+        assert "existing" in new_desc
+        assert "new-tag" in new_desc
 
     def test_add_duplicate_tag_is_idempotent(self):
-        """Adding an already-present tag should not call defineXML."""
-        domain = _make_domain(_domain_xml("tags: already-here"))
+        """Adding an already-present tag should not call setMetadata."""
+        domain = _make_domain(
+            _domain_xml("tags: already-here"), description="tags: already-here"
+        )
         conn = make_mock_conn()
 
         add_vm_tag(conn, domain, "already-here")
 
-        conn.defineXML.assert_not_called()
+        domain.setMetadata.assert_not_called()
 
     def test_add_tag_to_vm_with_no_existing_tags(self):
-        """VM with no description element should get one created."""
+        """VM with no description should get one created via setMetadata."""
         domain = _make_domain(_domain_xml(description=None))
         conn = make_mock_conn()
 
         add_vm_tag(conn, domain, "first-tag")
 
-        conn.defineXML.assert_called_once()
-        new_xml = conn.defineXML.call_args[0][0]
-        assert "tags: first-tag" in new_xml
+        domain.setMetadata.assert_called_once()
+        new_desc = domain.setMetadata.call_args[0][1]
+        assert "tags: first-tag" in new_desc
 
     def test_add_tag_to_empty_description(self):
-        """VM with empty description should get tags line."""
-        domain = _make_domain(_domain_xml(""))
+        """VM with empty description should get tags line via setMetadata."""
+        domain = _make_domain(_domain_xml(""), description="")
         conn = make_mock_conn()
 
         add_vm_tag(conn, domain, "brand-new")
 
-        conn.defineXML.assert_called_once()
-        new_xml = conn.defineXML.call_args[0][0]
-        assert "tags: brand-new" in new_xml
+        domain.setMetadata.assert_called_once()
+        new_desc = domain.setMetadata.call_args[0][1]
+        assert "tags: brand-new" in new_desc
 
     def test_add_preserves_existing_tags(self):
         """All previous tags should be kept when a new one is appended."""
-        domain = _make_domain(_domain_xml("tags: a, b"))
+        domain = _make_domain(_domain_xml("tags: a, b"), description="tags: a, b")
         conn = make_mock_conn()
 
         add_vm_tag(conn, domain, "c")
 
-        new_xml = conn.defineXML.call_args[0][0]
-        assert "tags: a, b, c" in new_xml
+        new_desc = domain.setMetadata.call_args[0][1]
+        assert "tags: a, b, c" in new_desc
 
-    def test_add_calls_xmldesc_with_inactive_flag(self):
-        """add_vm_tag should read persistent (inactive) XML."""
-        domain = _make_domain(_domain_xml("tags: x"))
+    def test_add_uses_setmetadata_with_description_type(self):
+        """add_vm_tag should use setMetadata with VIR_DOMAIN_METADATA_DESCRIPTION."""
+        domain = _make_domain(_domain_xml("tags: x"), description="tags: x")
         conn = make_mock_conn()
 
         add_vm_tag(conn, domain, "y")
 
-        # XMLDesc is called twice: once in get_vm_tags, once in add_vm_tag body
-        for c in domain.XMLDesc.call_args_list:
-            assert c == call(libvirt.VIR_DOMAIN_XML_INACTIVE)
+        domain.setMetadata.assert_called_once()
+        call_args = domain.setMetadata.call_args[0]
+        assert call_args[0] == libvirt.VIR_DOMAIN_METADATA_DESCRIPTION
+
+    def test_add_updates_live_and_config_when_active(self):
+        """On a running VM, setMetadata should use AFFECT_LIVE | AFFECT_CONFIG."""
+        domain = _make_domain(
+            _domain_xml("tags: x"), description="tags: x", is_active=True
+        )
+        conn = make_mock_conn()
+
+        add_vm_tag(conn, domain, "y")
+
+        expected_flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG | libvirt.VIR_DOMAIN_AFFECT_LIVE
+        actual_flags = domain.setMetadata.call_args[0][4]
+        assert actual_flags == expected_flags
+
+    def test_add_updates_config_only_when_shutoff(self):
+        """On a shutoff VM, setMetadata should use only AFFECT_CONFIG."""
+        domain = _make_domain(
+            _domain_xml("tags: x"), description="tags: x", is_active=False
+        )
+        conn = make_mock_conn()
+
+        add_vm_tag(conn, domain, "y")
+
+        actual_flags = domain.setMetadata.call_args[0][4]
+        assert actual_flags == libvirt.VIR_DOMAIN_AFFECT_CONFIG
 
 
 # ===========================================================================
@@ -192,50 +254,54 @@ class TestAddVmTag:
 # ===========================================================================
 
 class TestRemoveVmTag:
-    """Removing tags via description XML update."""
+    """Removing tags via setMetadata API."""
 
     def test_remove_existing_tag(self):
-        """Removing a present tag should update XML without that tag."""
-        domain = _make_domain(_domain_xml("tags: keep, remove-me"))
+        """Removing a present tag should call setMetadata without that tag."""
+        domain = _make_domain(
+            _domain_xml("tags: keep, remove-me"), description="tags: keep, remove-me"
+        )
         conn = make_mock_conn()
 
         remove_vm_tag(conn, domain, "remove-me")
 
-        conn.defineXML.assert_called_once()
-        new_xml = conn.defineXML.call_args[0][0]
-        assert "keep" in new_xml
-        assert "remove-me" not in new_xml
+        domain.setMetadata.assert_called_once()
+        new_desc = domain.setMetadata.call_args[0][1]
+        assert "keep" in new_desc
+        assert "remove-me" not in new_desc
 
     def test_remove_nonexistent_tag_is_noop(self):
-        """Removing a tag that isn't present should not call defineXML."""
-        domain = _make_domain(_domain_xml("tags: alpha"))
+        """Removing a tag that isn't present should not call setMetadata."""
+        domain = _make_domain(_domain_xml("tags: alpha"), description="tags: alpha")
         conn = make_mock_conn()
 
         remove_vm_tag(conn, domain, "not-here")
 
-        conn.defineXML.assert_not_called()
+        domain.setMetadata.assert_not_called()
 
     def test_remove_last_tag_leaves_empty_tags_line(self):
         """Removing the only tag should leave 'tags: ' (empty)."""
-        domain = _make_domain(_domain_xml("tags: lonely"))
+        domain = _make_domain(_domain_xml("tags: lonely"), description="tags: lonely")
         conn = make_mock_conn()
 
         remove_vm_tag(conn, domain, "lonely")
 
-        conn.defineXML.assert_called_once()
-        new_xml = conn.defineXML.call_args[0][0]
-        assert "tags: " in new_xml
-        assert "lonely" not in new_xml
+        domain.setMetadata.assert_called_once()
+        new_desc = domain.setMetadata.call_args[0][1]
+        assert "tags: " in new_desc
+        assert "lonely" not in new_desc
 
     def test_remove_preserves_remaining_tags(self):
         """Only the specified tag is removed; others stay."""
-        domain = _make_domain(_domain_xml("tags: a, b, c"))
+        domain = _make_domain(
+            _domain_xml("tags: a, b, c"), description="tags: a, b, c"
+        )
         conn = make_mock_conn()
 
         remove_vm_tag(conn, domain, "b")
 
-        new_xml = conn.defineXML.call_args[0][0]
-        assert "tags: a, c" in new_xml
+        new_desc = domain.setMetadata.call_args[0][1]
+        assert "tags: a, c" in new_desc
 
     def test_remove_from_vm_with_no_description(self):
         """Removing a tag from a VM with no description should be a no-op."""
@@ -244,16 +310,43 @@ class TestRemoveVmTag:
 
         remove_vm_tag(conn, domain, "anything")
 
-        conn.defineXML.assert_not_called()
+        domain.setMetadata.assert_not_called()
 
-    def test_remove_calls_xmldesc_with_inactive_flag(self):
-        domain = _make_domain(_domain_xml("tags: x"))
+    def test_remove_uses_setmetadata_with_description_type(self):
+        """remove_vm_tag should use setMetadata with VIR_DOMAIN_METADATA_DESCRIPTION."""
+        domain = _make_domain(_domain_xml("tags: x"), description="tags: x")
         conn = make_mock_conn()
 
         remove_vm_tag(conn, domain, "x")
 
-        for c in domain.XMLDesc.call_args_list:
-            assert c == call(libvirt.VIR_DOMAIN_XML_INACTIVE)
+        domain.setMetadata.assert_called_once()
+        call_args = domain.setMetadata.call_args[0]
+        assert call_args[0] == libvirt.VIR_DOMAIN_METADATA_DESCRIPTION
+
+    def test_remove_updates_live_and_config_when_active(self):
+        """On a running VM, setMetadata should use AFFECT_LIVE | AFFECT_CONFIG."""
+        domain = _make_domain(
+            _domain_xml("tags: x"), description="tags: x", is_active=True
+        )
+        conn = make_mock_conn()
+
+        remove_vm_tag(conn, domain, "x")
+
+        expected_flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG | libvirt.VIR_DOMAIN_AFFECT_LIVE
+        actual_flags = domain.setMetadata.call_args[0][4]
+        assert actual_flags == expected_flags
+
+    def test_remove_updates_config_only_when_shutoff(self):
+        """On a shutoff VM, setMetadata should use only AFFECT_CONFIG."""
+        domain = _make_domain(
+            _domain_xml("tags: x"), description="tags: x", is_active=False
+        )
+        conn = make_mock_conn()
+
+        remove_vm_tag(conn, domain, "x")
+
+        actual_flags = domain.setMetadata.call_args[0][4]
+        assert actual_flags == libvirt.VIR_DOMAIN_AFFECT_CONFIG
 
 
 # ===========================================================================

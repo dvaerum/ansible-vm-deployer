@@ -379,9 +379,10 @@ class VMManagerDaemon:
         """
         Check existing running VMs at startup (--check-existing mode).
         
-        Scans all running VMs and processes any that match filters.
-        VMs that are actively in use (in_use=true) are monitored via SSH.
-        VMs with stale tags (in_use=false or no metadata) get tags removed directly.
+        Scans all running VMs and starts SSH monitoring for any that match
+        filters and have removable tags.  Both "stale" (in_use=false) and
+        actively-in-use VMs go through the same SSH monitoring path so that
+        broken VMs are detected and handled via the --on-broken mechanism.
         """
         logger.info("Checking existing running VMs")
         
@@ -400,20 +401,19 @@ class VMManagerDaemon:
                     
                     vm_name = domain.name()
                     
-                    if self._is_vm_stale(domain):
-                        # Stale tag — remove directly without SSH wait
-                        logger.info(
-                            f"VM {vm_name} has stale removable tags "
-                            f"(in_use=false or no metadata), removing directly"
-                        )
-                        await self.tag_cleaner.remove_stale_tags(domain)
-                    else:
-                        # Check if it has removable tags and is actively in use
-                        vm_tags = get_vm_tags(domain)
-                        has_removable = any(tag in vm_tags for tag in self.tags_to_remove)
-                        if has_removable:
-                            logger.info(f"Processing existing VM (actively in use): {vm_name}")
-                            await self.tag_cleaner.handle_vm_started(domain)
+                    # Check if VM has any removable tags
+                    vm_tags = get_vm_tags(domain)
+                    has_removable = any(tag in vm_tags for tag in self.tags_to_remove)
+                    if not has_removable:
+                        continue
+                    
+                    # Route all VMs with removable tags through SSH monitoring.
+                    # Previously, stale VMs (in_use=false) had their tags
+                    # removed directly without SSH verification. This allowed
+                    # broken VMs to have their 'used' tag silently removed
+                    # every scan cycle without ever being detected as broken.
+                    logger.info(f"Processing existing VM: {vm_name}")
+                    await self.tag_cleaner.handle_vm_started(domain)
                 except Exception as e:
                     logger.error(
                         f"Error processing existing VM: {e}",
@@ -459,6 +459,16 @@ class VMManagerDaemon:
     async def _run_stale_tag_scan(self) -> None:
         """
         Run a single stale tag scan across all running VMs.
+
+        Finds VMs with stale removable tags (in_use=false + 'used' tag) and
+        starts SSH monitoring for them.  If the VM is reachable, the tags are
+        removed normally.  If SSH times out, the VM is marked broken and the
+        ``--on-broken`` script runs.
+
+        Previously this method removed stale tags directly without SSH
+        verification.  That allowed broken VMs to have their 'used' tag
+        silently removed every scan cycle, preventing the ``--on-broken``
+        repair mechanism from ever triggering.
         """
         try:
             domains = self.conn.listAllDomains(
@@ -468,7 +478,7 @@ class VMManagerDaemon:
             logger.error(f"Failed to list domains for stale scan: {e}")
             return
         
-        cleaned = 0
+        started = 0
         for domain in domains:
             try:
                 if not self._should_monitor_vm(domain):
@@ -484,16 +494,16 @@ class VMManagerDaemon:
                 if self._is_vm_stale(domain):
                     logger.info(
                         f"Stale tag scan: VM {vm_name} has stale removable tags, "
-                        "removing directly"
+                        "starting SSH monitoring"
                     )
-                    await self.tag_cleaner.remove_stale_tags(domain)
-                    cleaned += 1
+                    await self.tag_cleaner.handle_vm_started(domain)
+                    started += 1
             
             except Exception as e:
                 logger.error(f"Error scanning VM for stale tags: {e}")
         
-        if cleaned > 0:
-            logger.info(f"Stale tag scan: cleaned {cleaned} VM(s)")
+        if started > 0:
+            logger.info(f"Stale tag scan: started monitoring {started} VM(s)")
         else:
             logger.debug("Stale tag scan: no stale tags found")
     

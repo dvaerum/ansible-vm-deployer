@@ -441,10 +441,10 @@ class TestIsVMStale:
 class TestCheckExistingVMs:
     """Tests for the startup scan of running VMs.
 
-    _check_existing_vms delegates to _is_vm_stale (tested separately):
-    - Stale VMs → remove_stale_tags() (direct removal)
-    - Non-stale VMs with removable tags → handle_vm_started() (SSH wait)
-    - VMs without removable tags → skipped
+    _check_existing_vms routes ALL VMs with removable tags through SSH
+    monitoring (handle_vm_started), regardless of whether they are stale
+    (in_use=false) or actively in use.  This ensures broken VMs are always
+    detected via SSH timeout rather than having tags silently removed.
     """
 
     def _setup(self, **overrides):
@@ -452,12 +452,11 @@ class TestCheckExistingVMs:
         d.conn = Mock()
         d.tag_cleaner = Mock()
         d.tag_cleaner.handle_vm_started = AsyncMock()
-        d.tag_cleaner.remove_stale_tags = AsyncMock()
         return d
 
     @pytest.mark.asyncio
-    async def test_actively_in_use_vms_get_ssh_monitoring(self):
-        """Matching VMs that are not stale and have removable tags go through SSH-wait."""
+    async def test_vms_with_removable_tags_get_ssh_monitoring(self):
+        """Matching VMs with removable tags go through SSH-wait."""
         d = self._setup()
 
         domain_a = _make_domain("vm-a", "uuid-a")
@@ -465,14 +464,30 @@ class TestCheckExistingVMs:
         d.conn.listAllDomains.return_value = [domain_a, domain_b]
 
         with patch.object(d, "_should_monitor_vm", return_value=True), \
-             patch.object(d, "_is_vm_stale", return_value=False), \
              patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test", "used"]):
             await d._check_existing_vms()
 
         assert d.tag_cleaner.handle_vm_started.await_count == 2
         d.tag_cleaner.handle_vm_started.assert_any_await(domain_a)
         d.tag_cleaner.handle_vm_started.assert_any_await(domain_b)
-        d.tag_cleaner.remove_stale_tags.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_vms_also_get_ssh_monitoring(self):
+        """Stale VMs (in_use=false) also go through SSH monitoring, not direct removal.
+
+        This is the Bug 1 fix: previously stale VMs had tags removed directly
+        without SSH verification, allowing broken VMs to escape detection.
+        """
+        d = self._setup()
+
+        domain = _make_domain("stale-tag-vm")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=True), \
+             patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test", "used"]):
+            await d._check_existing_vms()
+
+        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(domain)
 
     @pytest.mark.asyncio
     async def test_skips_non_matching_vms(self):
@@ -486,42 +501,24 @@ class TestCheckExistingVMs:
             await d._check_existing_vms()
 
         d.tag_cleaner.handle_vm_started.assert_not_called()
-        d.tag_cleaner.remove_stale_tags.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_stale_vms_get_direct_tag_removal(self):
-        """Stale VMs get tags removed directly without SSH wait."""
-        d = self._setup()
-
-        domain = _make_domain("stale-tag-vm")
-        d.conn.listAllDomains.return_value = [domain]
-
-        with patch.object(d, "_should_monitor_vm", return_value=True), \
-             patch.object(d, "_is_vm_stale", return_value=True):
-            await d._check_existing_vms()
-
-        d.tag_cleaner.handle_vm_started.assert_not_called()
-        d.tag_cleaner.remove_stale_tags.assert_awaited_once_with(domain)
 
     @pytest.mark.asyncio
     async def test_skips_vms_without_removable_tags(self):
-        """Non-stale matching VMs with NO removable tags should be skipped."""
+        """Matching VMs with NO removable tags should be skipped."""
         d = self._setup()
 
         domain = _make_domain("clean-vm")
         d.conn.listAllDomains.return_value = [domain]
 
         with patch.object(d, "_should_monitor_vm", return_value=True), \
-             patch.object(d, "_is_vm_stale", return_value=False), \
              patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test"]):
             await d._check_existing_vms()
 
         d.tag_cleaner.handle_vm_started.assert_not_called()
-        d.tag_cleaner.remove_stale_tags.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_mixed_vms_correct_routing(self):
-        """Active VMs get SSH monitoring, stale VMs get direct removal, non-matching skipped."""
+        """VMs with removable tags get SSH monitoring; non-matching and clean VMs skipped."""
         d = self._setup()
 
         active_vm = _make_domain("active-vm", "u1")
@@ -539,18 +536,14 @@ class TestCheckExistingVMs:
                 return ["linux-test"]  # no removable tags
             return ["linux-test", "used"]
 
-        def mock_is_stale(domain):
-            return domain.name() == "stale-vm"
-
         with patch.object(d, "_should_monitor_vm", side_effect=mock_should_monitor), \
-             patch.object(d, "_is_vm_stale", side_effect=mock_is_stale), \
              patch("vm_manager.daemon.get_vm_tags", side_effect=mock_get_tags):
             await d._check_existing_vms()
 
-        # active_vm → SSH monitoring
-        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(active_vm)
-        # stale_vm → direct removal
-        d.tag_cleaner.remove_stale_tags.assert_awaited_once_with(stale_vm)
+        # Both active_vm and stale_vm have removable tags → SSH monitoring
+        assert d.tag_cleaner.handle_vm_started.await_count == 2
+        d.tag_cleaner.handle_vm_started.assert_any_await(active_vm)
+        d.tag_cleaner.handle_vm_started.assert_any_await(stale_vm)
 
     @pytest.mark.asyncio
     async def test_handles_empty_domain_list(self):
@@ -560,7 +553,6 @@ class TestCheckExistingVMs:
         await d._check_existing_vms()
 
         d.tag_cleaner.handle_vm_started.assert_not_called()
-        d.tag_cleaner.remove_stale_tags.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_continues_on_per_domain_exception(self):
@@ -577,7 +569,6 @@ class TestCheckExistingVMs:
             return True
 
         with patch.object(d, "_should_monitor_vm", side_effect=mock_should_monitor), \
-             patch.object(d, "_is_vm_stale", return_value=False), \
              patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test", "used"]):
             await d._check_existing_vms()
 
@@ -786,21 +777,26 @@ class TestShutdown:
 # ===================================================================
 
 class TestRunStaleScan:
-    """Tests for the periodic stale tag scan."""
+    """Tests for the periodic stale tag scan.
+
+    The stale scan now routes VMs through SSH monitoring (handle_vm_started)
+    instead of removing tags directly.  This ensures broken VMs are detected
+    via SSH timeout and handled by the --on-broken mechanism.
+    """
 
     def _setup(self, stale_scan_interval=300, **overrides):
         d = _make_daemon(stale_scan_interval=stale_scan_interval, **overrides)
         d.conn = Mock()
         d.tag_cleaner = Mock()
-        d.tag_cleaner.remove_stale_tags = AsyncMock()
+        d.tag_cleaner.handle_vm_started = AsyncMock()
         d.vm_tracker = Mock()
         d.vm_tracker.is_monitoring = AsyncMock(return_value=False)
         d._running = True
         return d
 
     @pytest.mark.asyncio
-    async def test_cleans_stale_vms(self):
-        """Stale VMs should have tags removed directly."""
+    async def test_stale_vms_get_ssh_monitoring(self):
+        """Stale VMs should be routed through SSH monitoring."""
         d = self._setup()
 
         domain = _make_domain("stale-vm", "uuid-stale")
@@ -810,7 +806,7 @@ class TestRunStaleScan:
              patch.object(d, "_is_vm_stale", return_value=True):
             await d._run_stale_tag_scan()
 
-        d.tag_cleaner.remove_stale_tags.assert_awaited_once_with(domain)
+        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(domain)
 
     @pytest.mark.asyncio
     async def test_skips_non_matching_vms(self):
@@ -823,7 +819,7 @@ class TestRunStaleScan:
         with patch.object(d, "_should_monitor_vm", return_value=False):
             await d._run_stale_tag_scan()
 
-        d.tag_cleaner.remove_stale_tags.assert_not_called()
+        d.tag_cleaner.handle_vm_started.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_skips_currently_monitored_vms(self):
@@ -838,7 +834,7 @@ class TestRunStaleScan:
              patch.object(d, "_is_vm_stale", return_value=True):
             await d._run_stale_tag_scan()
 
-        d.tag_cleaner.remove_stale_tags.assert_not_called()
+        d.tag_cleaner.handle_vm_started.assert_not_called()
         d.vm_tracker.is_monitoring.assert_awaited_once_with("uuid-monitored")
 
     @pytest.mark.asyncio
@@ -853,11 +849,11 @@ class TestRunStaleScan:
              patch.object(d, "_is_vm_stale", return_value=False):
             await d._run_stale_tag_scan()
 
-        d.tag_cleaner.remove_stale_tags.assert_not_called()
+        d.tag_cleaner.handle_vm_started.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_mixed_vms_only_stale_cleaned(self):
-        """Only stale, matching, non-monitored VMs should be cleaned."""
+    async def test_mixed_vms_only_stale_monitored(self):
+        """Only stale, matching, non-monitored VMs should get SSH monitoring."""
         d = self._setup()
 
         stale_vm = _make_domain("stale-vm", "uuid-stale")
@@ -884,7 +880,7 @@ class TestRunStaleScan:
              patch.object(d, "_is_vm_stale", side_effect=mock_is_stale):
             await d._run_stale_tag_scan()
 
-        d.tag_cleaner.remove_stale_tags.assert_awaited_once_with(stale_vm)
+        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(stale_vm)
 
     @pytest.mark.asyncio
     async def test_handles_listAllDomains_exception(self):
@@ -913,7 +909,7 @@ class TestRunStaleScan:
              patch.object(d, "_is_vm_stale", return_value=True):
             await d._run_stale_tag_scan()
 
-        d.tag_cleaner.remove_stale_tags.assert_awaited_once_with(good_domain)
+        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(good_domain)
 
 
 class TestStaleScanLoop:

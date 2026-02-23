@@ -11,101 +11,162 @@ from typing import List, Optional, Dict
 logger = logging.getLogger(__name__)
 
 
-def get_vm_tags(domain: libvirt.virDomain) -> List[str]:
-    """Get tags for a VM from its XML description.
-    
+def _parse_tags_from_description(description: str) -> List[str]:
+    """Parse tags from a description string.
+
+    Args:
+        description: The description text (may be multiline)
+
+    Returns:
+        List of tag strings
+    """
+    tags: List[str] = []
+    for line in description.split("\n"):
+        if line.strip().startswith("tags:"):
+            tag_str = line.split("tags:", 1)[1]
+            tags.extend([t.strip() for t in tag_str.split(",") if t.strip()])
+    return tags
+
+
+def _build_description(tags: List[str]) -> str:
+    """Build a description string from a list of tags.
+
+    Args:
+        tags: List of tag strings
+
+    Returns:
+        Description string in 'tags: a, b, c' format
+    """
+    return "tags: " + ", ".join(tags)
+
+
+def _get_description(domain: libvirt.virDomain) -> Optional[str]:
+    """Read the persistent description from a domain.
+
+    Tries the metadata API first (``domain.metadata()``), which returns the
+    description directly without needing full XML parsing.  Falls back to
+    XML parsing if the metadata API is unavailable or returns no metadata.
+
     Args:
         domain: libvirt domain object
-        
+
+    Returns:
+        Description string, or None if no description is set
+    """
+    try:
+        desc = domain.metadata(
+            libvirt.VIR_DOMAIN_METADATA_DESCRIPTION,
+            None,
+            libvirt.VIR_DOMAIN_AFFECT_CONFIG,
+        )
+        if desc:
+            return desc
+    except libvirt.libvirtError:
+        # VIR_ERR_NO_DOMAIN_METADATA or older libvirt — fall through to XML
+        pass
+
+    # Fallback: parse full inactive XML
+    xml_desc = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+    root = ET.fromstring(xml_desc)
+    desc_elem = root.find(".//description")
+    if desc_elem is not None and desc_elem.text:
+        return desc_elem.text
+    return None
+
+
+def _set_description(domain: libvirt.virDomain, description: str) -> None:
+    """Write the description to a domain, updating both live and persistent config.
+
+    Uses ``domain.setMetadata()`` which correctly updates both the live
+    (running) and persistent (inactive) configurations atomically.  The
+    previous approach of reading inactive XML + ``defineXML()`` only updated
+    the persistent config; on a running VM the live config could overwrite
+    the persistent config in certain situations (e.g. on save/restore),
+    causing tag changes to silently revert.
+
+    For shutoff VMs only the persistent config is updated (``AFFECT_LIVE``
+    is not valid when the domain is not running).
+
+    Args:
+        domain: libvirt domain object
+        description: New description text
+    """
+    flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+    try:
+        if domain.isActive():
+            flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
+    except libvirt.libvirtError:
+        # If we can't determine state, just update the persistent config.
+        # This is the safe fallback — it's what defineXML() used to do.
+        pass
+
+    domain.setMetadata(
+        libvirt.VIR_DOMAIN_METADATA_DESCRIPTION,
+        description,
+        None,
+        None,
+        flags,
+    )
+
+
+def get_vm_tags(domain: libvirt.virDomain) -> List[str]:
+    """Get tags for a VM from its description.
+
+    Reads the persistent (inactive) domain description and parses the
+    ``tags: tag1, tag2, ...`` line.
+
+    Args:
+        domain: libvirt domain object
+
     Returns:
         List of tags
     """
-    # Use inactive XML to get persistent config (where tags are stored)
-    xml_desc = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
-    root = ET.fromstring(xml_desc)
-    
-    # Look for metadata tags in description or custom metadata
-    tags = []
-    
-    # Check description field
-    desc_elem = root.find(".//description")
-    if desc_elem is not None and desc_elem.text:
-        # Parse tags from description (format: tags: tag1, tag2, tag3)
-        for line in desc_elem.text.split("\n"):
-            if line.strip().startswith("tags:"):
-                tag_str = line.split("tags:", 1)[1]
-                tags.extend([t.strip() for t in tag_str.split(",") if t.strip()])
-    
-    return tags
+    description = _get_description(domain)
+    if not description:
+        return []
+    return _parse_tags_from_description(description)
 
 
 def add_vm_tag(conn: libvirt.virConnect, domain: libvirt.virDomain, tag: str) -> None:
     """Add a tag to VM's description.
-    
+
+    Uses ``domain.setMetadata()`` so the change is applied to both the live
+    and persistent configurations of running VMs.  The ``conn`` parameter is
+    retained for API compatibility but is no longer used internally.
+
     Args:
-        conn: libvirt connection object
+        conn: libvirt connection object (unused, kept for API compatibility)
         domain: libvirt domain object
         tag: Tag to add
     """
-    # Get current tags
     current_tags = get_vm_tags(domain)
-    
-    # Don't add if already present
+
     if tag in current_tags:
         return
-    
+
     current_tags.append(tag)
-    
-    # Update description
-    xml_desc = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
-    root = ET.fromstring(xml_desc)
-    
-    desc_elem = root.find(".//description")
-    if desc_elem is None:
-        desc_elem = ET.SubElement(root, "description")
-    
-    # Build new description with tags
-    desc_elem.text = "tags: " + ", ".join(current_tags)
-    
-    # Update domain XML
-    new_xml = ET.tostring(root, encoding="unicode")
-    conn.defineXML(new_xml)
+    _set_description(domain, _build_description(current_tags))
 
 
 def remove_vm_tag(conn: libvirt.virConnect, domain: libvirt.virDomain, tag: str) -> None:
     """Remove a tag from VM's description.
-    
+
+    Uses ``domain.setMetadata()`` so the change is applied to both the live
+    and persistent configurations of running VMs.  The ``conn`` parameter is
+    retained for API compatibility but is no longer used internally.
+
     Args:
-        conn: libvirt connection object
+        conn: libvirt connection object (unused, kept for API compatibility)
         domain: libvirt domain object
         tag: Tag to remove
     """
-    # Get current tags
     current_tags = get_vm_tags(domain)
-    
-    # Remove the tag if present
+
     if tag not in current_tags:
         return
-    
+
     current_tags.remove(tag)
-    
-    # Update description
-    xml_desc = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
-    root = ET.fromstring(xml_desc)
-    
-    desc_elem = root.find(".//description")
-    if desc_elem is None:
-        return
-    
-    # Build new description with remaining tags
-    if current_tags:
-        desc_elem.text = "tags: " + ", ".join(current_tags)
-    else:
-        desc_elem.text = "tags: "
-    
-    # Update domain XML
-    new_xml = ET.tostring(root, encoding="unicode")
-    conn.defineXML(new_xml)
+    _set_description(domain, _build_description(current_tags))
 
 
 def get_network_to_interface_mapping(domain: libvirt.virDomain) -> Dict[str, str]:

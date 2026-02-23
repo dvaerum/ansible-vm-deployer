@@ -685,27 +685,6 @@ class TagCleaner:
             )
             return False
 
-    async def remove_stale_tags(self, domain: libvirt.virDomain) -> None:
-        """
-        Remove stale tags from a VM directly, without waiting for SSH.
-        
-        Used by the stale tag scan and --check-existing startup scan for VMs
-        that have removable tags but are not actively in use (in_use=false or
-        no metadata). These VMs don't need an SSH check — the deploy already
-        finished.
-        
-        Args:
-            domain: The libvirt domain to clean
-        """
-        try:
-            vm_name = domain.name()
-            vm_uuid = domain.UUIDString()
-        except libvirt.libvirtError as e:
-            logger.error(f"Failed to get VM info for stale tag removal: {e}")
-            return
-        
-        await self._remove_tags(vm_name, vm_uuid)
-    
     async def _remove_tags(
         self,
         vm_name: str,

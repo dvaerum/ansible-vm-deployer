@@ -1,6 +1,6 @@
 # Project Status
 
-**Last Updated:** February 18, 2026  
+**Last Updated:** February 23, 2026  
 **Version:** 0.2.0  
 **Status:** Production-Ready
 
@@ -76,7 +76,7 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 #### Testing
 - ✅ 174 VM Manager unit tests
 - ✅ 8 manual tests with real VMs
-- ✅ 100% test pass rate (383/383 total)
+- ✅ 100% test pass rate (388/388 total)
 - ✅ Mocked dependencies for isolation
 
 #### Documentation
@@ -98,19 +98,19 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 
 | Component | Lines of Code | Tests | Documentation |
 |-----------|---------------|-------|---------------|
-| Ansible Deployer | ~2,400 | 209 | ~3,000 |
+| Ansible Deployer | ~2,400 | 214 | ~3,000 |
 | VM Manager | ~2,400 | 174 | ~2,625 |
 | Shared Library | ~450 | Covered by both | - |
-| **Total** | **~5,250** | **383** | **5,625+** |
+| **Total** | **~5,250** | **388** | **5,625+** |
 
 ### Test Coverage
 
 ```
-Total Tests: 383/383 (100% pass rate)
-├── Shared/Deployer: 209 tests
+Total Tests: 388/388 (100% pass rate)
+├── Shared/Deployer: 214 tests
 │   ├── test_allocate_vms.py: 43 tests (allocation, multi-host allocation, auto-exclude broken)
 │   ├── test_integration.py: 45 tests (config, VMManager multi-host, executor, metadata, workflow)
-│   ├── test_vm_operations.py: 45 tests (tag CRUD, IP resolution, state strings)
+│   ├── test_vm_operations.py: 50 tests (tag CRUD, IP resolution, state strings, setMetadata API, XML fallback)
 │   ├── test_metadata_manager.py: 41 tests (get/set/claim/clear metadata)
 │   ├── test_log_prefix.py: 20 tests (prefix sanitization, subdirectory creation, repeat suffixes)
 │   ├── test_tag_filters.py: 14 tests (required/exclude tag matching)
@@ -430,7 +430,7 @@ Dennis Vestergaard Værum (github@varum.dk)
 
 **Project Quality Metrics:**
 
-- ✅ 100% test pass rate (383/383 tests)
+- ✅ 100% test pass rate (388/388 tests)
 - ✅ Comprehensive documentation (5,625+ lines)
 - ✅ Production-ready code quality
 - ✅ Professional project structure

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - Shared Library (Production Bug)
+
+- **Fix: Tag modifications silently revert on running VMs** — `add_vm_tag()` and `remove_vm_tag()` used `XMLDesc(VIR_DOMAIN_XML_INACTIVE)` + `conn.defineXML()` which only updates the persistent (inactive) XML config. On running VMs, the live config is separate, and libvirt can overwrite persistent changes from the live config, causing tag modifications to silently revert. Now uses `domain.setMetadata(VIR_DOMAIN_METADATA_DESCRIPTION, ...)` with `VIR_DOMAIN_AFFECT_CONFIG | VIR_DOMAIN_AFFECT_LIVE` flags for running VMs and `VIR_DOMAIN_AFFECT_CONFIG` for shutoff VMs. `get_vm_tags()` uses the metadata API with XML fallback for robustness. The `conn` parameter in `add_vm_tag()`/`remove_vm_tag()` is now unused but kept for API compatibility.
+
+### Fixed - VM Manager (Production Bug)
+
+- **Fix: Stale tag scan bypasses SSH monitoring, preventing broken VM repair** — The periodic stale tag scan (`_run_stale_tag_scan()`) and startup scan (`_check_existing_vms()`) called `tag_cleaner.remove_stale_tags()` which removed stale `used` tags directly without checking SSH connectivity. This meant broken VMs had their tags silently stripped every scan cycle, so the `--on-broken` repair mechanism never triggered — the VM was never marked `broken` because it never went through SSH monitoring. Both methods now route stale VMs through `tag_cleaner.handle_vm_started()` instead, so: SSH succeeds -> tag removed normally; SSH fails -> timeout -> VM marked `broken` -> `--on-broken` script runs. The `remove_stale_tags()` method has been removed from `TagCleaner`.
+
+### Changed - Test Suite (Bug Fix Coverage)
+
+- **5 new tests for setMetadata and stale scan bug fixes** — Added tests verifying: metadata API is used for tag operations, XML fallback when metadata API fails, `AFFECT_LIVE | AFFECT_CONFIG` flags used for active VMs, `AFFECT_CONFIG` only for shutoff VMs, and stale VMs routed through SSH monitoring instead of direct tag removal. Updated mock infrastructure (`make_mock_domain()` in conftest.py) to support `domain.metadata()` dispatch by type, `domain.isActive()`, and `domain.setMetadata()`. Replaced all `conn.defineXML` assertions with `domain.setMetadata` assertions in `test_vm_operations.py`. Total: 388 tests (214 shared/deployer + 174 vm-manager), 100% pass rate.
+
 ### Added - Ansible Deployer
 
 - **Multi-host libvirt connections** — ansible-deployer can now search for VMs across multiple libvirt hosts. Configure named connections in `config.yaml` with per-host settings:
@@ -46,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed - Test Suite
 
-- **Test quality improvements** — Added URI assertion to context manager test (verifies `libvirt.open` called with correct URI), added regression test for the `connect()` handle leak fix (verifies first connection is closed before second is opened), removed 2 duplicate tests from `test_vm_manager.py` that were identical to tests in `test_integration.py`. Total: 383 tests (209 shared/deployer + 174 vm-manager), 100% pass rate.
+- **Test quality improvements** — Added URI assertion to context manager test (verifies `libvirt.open` called with correct URI), added regression test for the `connect()` handle leak fix (verifies first connection is closed before second is opened), removed 2 duplicate tests from `test_vm_manager.py` that were identical to tests in `test_integration.py`. Total: 388 tests (214 shared/deployer + 174 vm-manager), 100% pass rate.
 
 ### Fixed - VM Manager (Critical Review)
 
@@ -65,10 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added - VM Manager
 
-- **Periodic stale tag scan** — New `--stale-scan-interval` option (default: 300 seconds / 5 minutes) periodically scans all running VMs and removes stale `used` tags directly, without waiting for SSH. A tag is stale when the VM has a removable tag (e.g., `used`) in its inactive XML but is no longer actively in use by ansible-deployer (`in_use=false` or no metadata). This catches VMs where the deployer finished but the VM was never rebooted, so vm-manager never got a lifecycle event to trigger cleanup.
+- **Periodic stale tag scan** — New `--stale-scan-interval` option (default: 300 seconds / 5 minutes) periodically scans all running VMs and routes stale VMs through SSH monitoring via `handle_vm_started()`. A tag is stale when the VM has a removable tag (e.g., `used`) in its description but is no longer actively in use by ansible-deployer (`in_use=false` or no metadata). This catches VMs where the deployer finished but the VM was never rebooted, so vm-manager never got a lifecycle event to trigger cleanup. If SSH succeeds, the tag is removed normally; if SSH fails, the VM is marked broken and the `--on-broken` script runs.
   - New CLI option: `--stale-scan-interval SECONDS` (default: 300, 0 = disabled)
   - New NixOS option: `services.vm-manager.staleScanInterval` (default: 300)
-  - Startup scan (`--check-existing`) also uses this logic: stale VMs get tags removed directly, actively-in-use VMs go through SSH monitoring
+  - Startup scan (`--check-existing`) also uses this logic: both stale and actively-in-use VMs go through SSH monitoring
 
 ### Fixed - VM Manager
 
@@ -82,7 +94,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
 
 - **Fix: Cleanup race with ansible-deployer** — Added a 5-second delay before tag removal to ensure ansible-deployer's `reset_vm()` + `mark_available()` cleanup has fully completed. The non-blocking reboot means metadata is cleared before the VM finishes rebooting.
 
-- **Fix: Stale `used` tags on startup with `--check-existing`** — Added `_is_vm_stale()` check when processing existing running VMs at startup. VMs with a `used` tag but no active deployer session (no `in_use` metadata) are now correctly identified as stale and have their tags removed directly, instead of starting infinite SSH retry loops.
+- **Fix: Stale `used` tags on startup with `--check-existing`** — Added `_is_vm_stale()` check when processing existing running VMs at startup. VMs with a `used` tag but no active deployer session (no `in_use` metadata) are now correctly identified as stale and routed through SSH monitoring via `handle_vm_started()`, where they either get tags removed (SSH success) or get marked broken (SSH timeout).
 
 - **Fix: Orphaned monitor tasks for VMs without removable tags** — Added tag check in `_handle_vm_started()` to verify the VM actually has tags that need removing before starting a monitor. Previously, when `reset_vm()` rebooted a VM after the `used` tag was already removed, vm-manager would start a new infinite SSH retry loop. These orphaned monitors accumulated without bound.
 
@@ -219,11 +231,11 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
   - Troubleshooting guide
 
 #### Test Suite
-- **383 comprehensive unit tests** covering multi-host libvirt connections, all 7 race condition fixes, broken tag feature, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), repair flow, CancelledError handling, and stale tag scanning:
+- **388 comprehensive unit tests** covering multi-host libvirt connections, all 7 race condition fixes, broken tag feature, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), repair flow, CancelledError handling, stale tag scanning, and setMetadata API usage:
   - `tests/conftest.py`: Shared fixtures (`make_mock_domain()`, `make_mock_conn()`)
   - `tests/test_integration.py`: 45 tests (config, VMManager multi-host, executor, metadata, workflow)
   - `tests/test_allocate_vms.py`: 43 tests (VM allocation, multi-host allocation, auto-exclude broken)
-  - `tests/test_vm_operations.py`: 45 tests (tag CRUD, IP resolution, state strings)
+  - `tests/test_vm_operations.py`: 50 tests (tag CRUD, IP resolution, state strings, setMetadata API, XML fallback)
   - `tests/test_metadata_manager.py`: 41 tests (MetadataManager get/set/claim/clear)
   - `tests/test_log_prefix.py`: 20 tests (prefix sanitization, subdirectory creation, repeat suffixes)
   - `tests/test_tag_filters.py`: 14 tests (`vm_matches_tags()` — required/exclude tags)
@@ -234,7 +246,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
   - `tests/vm_manager/test_event_monitor.py`: 15 tests (reboot callback registration)
   - `tests/vm_manager/test_vm_tracker.py`: 7 tests (session management, debouncing)
 - **8 manual tests**: All scenarios validated with real VMs
-- **100% test pass rate**: 383/383 total tests
+- **100% test pass rate**: 388/388 total tests
 - **Mocked dependencies**: No real VMs or libvirt connection needed for unit tests
 
 #### Bug Fixes (During Development)

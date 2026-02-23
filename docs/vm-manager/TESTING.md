@@ -17,13 +17,13 @@ Comprehensive testing documentation for VM Manager, covering unit tests, manual 
 
 ### Test Coverage
 
-The project has **383 comprehensive unit tests** (209 shared/deployer + 174 vm-manager) covering all core functionality, multi-host libvirt connections, race condition fixes, broken VM handling, auto-exclude behavior, the `--on-broken` script hook (with retry/timeout/repair flow), CancelledError handling, and stale tag scanning:
+The project has **388 comprehensive unit tests** (214 shared/deployer + 174 vm-manager) covering all core functionality, multi-host libvirt connections, race condition fixes, broken VM handling, auto-exclude behavior, the `--on-broken` script hook (with retry/timeout/repair flow), CancelledError handling, stale tag scanning, and setMetadata API usage:
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
 | `tests/conftest.py` | Fixtures | `make_mock_domain()`, `make_mock_conn()` helpers |
 | `tests/test_tag_filters.py` | 14 | `vm_matches_tags()` — required/exclude tags |
-| `tests/test_vm_operations.py` | 45 | Tag CRUD, IP resolution, state strings (includes parametrized) |
+| `tests/test_vm_operations.py` | 50 | Tag CRUD, IP resolution, state strings, setMetadata API, XML fallback (includes parametrized) |
 | `tests/test_metadata_manager.py` | 41 | MetadataManager get/set/claim/clear |
 | `tests/test_allocate_vms.py` | 43 | VM allocation, multi-host allocation, auto-exclude broken |
 | `tests/vm_manager/test_daemon.py` | 70 | Event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag, on-broken timeout/retries/delay init |
@@ -31,11 +31,11 @@ The project has **383 comprehensive unit tests** (209 shared/deployer + 174 vm-m
 | `tests/vm_manager/test_ssh_checker.py` | 23 | Uptime verification, string return values |
 | `tests/vm_manager/test_event_monitor.py` | 15 | Reboot callback registration |
 | `tests/vm_manager/test_vm_tracker.py` | 7 | Session management, debouncing |
-| **Total** | **383** | All race conditions, multi-host connections, broken VM handling, auto-exclude, on-broken (retry/timeout/repair), CancelledError, stale scan |
+| **Total** | **388** | All race conditions, multi-host connections, broken VM handling, auto-exclude, on-broken (retry/timeout/repair), CancelledError, stale scan, setMetadata API |
 
 ### Test Types
 
-1. **Unit Tests** (383 tests)
+1. **Unit Tests** (388 tests)
    - Mocked dependencies (libvirt, paramiko)
    - Fast execution (<1 minute)
    - Run automatically in CI/CD
