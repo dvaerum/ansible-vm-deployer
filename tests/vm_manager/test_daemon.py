@@ -40,11 +40,12 @@ def _make_daemon(**overrides):
         exclude_tags=["broken"],
         tags_to_remove=["used"],
         check_interval=10,
-        max_wait_time=300,
         check_existing=False,
         boot_at_start=False,
         boot_always=False,
         broken_tag=None,
+        broken_timeout=300,
+        on_broken_delay=1500,
     )
     defaults.update(overrides)
     return VMManagerDaemon(**defaults)
@@ -74,11 +75,12 @@ class TestVMManagerDaemonInit:
             exclude_tags=["exc"],
             tags_to_remove=["used"],
             check_interval=15,
-            max_wait_time=600,
             check_existing=True,
             boot_at_start=True,
             boot_always=False,
             broken_tag="broken",
+            broken_timeout=600,
+            on_broken_delay=900,
         )
 
         assert d.libvirt_uri == "qemu+ssh://host/system"
@@ -88,11 +90,12 @@ class TestVMManagerDaemonInit:
         assert d.exclude_tags == ["exc", "broken"]
         assert d.tags_to_remove == ["used"]
         assert d.check_interval == 15
-        assert d.max_wait_time == 600
         assert d.check_existing is True
         assert d.boot_at_start is True
         assert d.boot_always is False
         assert d.broken_tag == "broken"
+        assert d.broken_timeout == 600
+        assert d.on_broken_delay == 900
 
     def test_default_broken_tag_is_none(self):
         d = _make_daemon()
@@ -171,6 +174,22 @@ class TestVMManagerDaemonInit:
     def test_default_on_broken_retry_delay(self):
         d = _make_daemon()
         assert d.on_broken_retry_delay == 60
+
+    def test_stores_broken_timeout(self):
+        d = _make_daemon(broken_timeout=600)
+        assert d.broken_timeout == 600
+
+    def test_default_broken_timeout(self):
+        d = _make_daemon()
+        assert d.broken_timeout == 300
+
+    def test_stores_on_broken_delay(self):
+        d = _make_daemon(on_broken_delay=900)
+        assert d.on_broken_delay == 900
+
+    def test_default_on_broken_delay(self):
+        d = _make_daemon()
+        assert d.on_broken_delay == 1500
 
     def test_stores_stale_scan_interval(self):
         d = _make_daemon(stale_scan_interval=120)

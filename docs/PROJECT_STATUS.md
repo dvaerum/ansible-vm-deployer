@@ -1,6 +1,6 @@
 # Project Status
 
-**Last Updated:** February 23, 2026  
+**Last Updated:** February 25, 2026  
 **Version:** 0.2.0  
 **Status:** Production-Ready
 
@@ -41,7 +41,7 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 **Purpose:** Monitor VMs and automatically manage tags based on SSH connectivity.
 
 **Maturity:** Newly released, production-ready  
-**Test Coverage:** 174 tests, 100% pass rate  
+**Test Coverage:** 210 tests, 100% pass rate  
 **Documentation:** Complete (2,400+ lines)
 
 **Key Features:**
@@ -74,9 +74,9 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 - ✅ Shared library (`vm_tools_common`)
 
 #### Testing
-- ✅ 174 VM Manager unit tests
+- ✅ 210 VM Manager unit tests
 - ✅ 8 manual tests with real VMs
-- ✅ 100% test pass rate (388/388 total)
+- ✅ 100% test pass rate (424/424 total)
 - ✅ Mocked dependencies for isolation
 
 #### Documentation
@@ -99,14 +99,14 @@ This project provides a comprehensive suite of tools for managing libvirt VMs in
 | Component | Lines of Code | Tests | Documentation |
 |-----------|---------------|-------|---------------|
 | Ansible Deployer | ~2,400 | 214 | ~3,000 |
-| VM Manager | ~2,400 | 174 | ~2,625 |
+| VM Manager | ~2,400 | 210 | ~2,625 |
 | Shared Library | ~450 | Covered by both | - |
-| **Total** | **~5,250** | **388** | **5,625+** |
+| **Total** | **~5,250** | **424** | **5,625+** |
 
 ### Test Coverage
 
 ```
-Total Tests: 388/388 (100% pass rate)
+Total Tests: 424/424 (100% pass rate)
 ├── Shared/Deployer: 214 tests
 │   ├── test_allocate_vms.py: 43 tests (allocation, multi-host allocation, auto-exclude broken)
 │   ├── test_integration.py: 45 tests (config, VMManager multi-host, executor, metadata, workflow)
@@ -115,9 +115,9 @@ Total Tests: 388/388 (100% pass rate)
 │   ├── test_log_prefix.py: 20 tests (prefix sanitization, subdirectory creation, repeat suffixes)
 │   ├── test_tag_filters.py: 14 tests (required/exclude tag matching)
 │   └── test_vm_manager.py: 1 test (connect() handle leak regression)
-└── VM Manager: 174 tests
-    ├── test_daemon.py: 70 tests
-    ├── test_tag_cleaner.py: 59 tests
+└── VM Manager: 210 tests
+    ├── test_tag_cleaner.py: 91 tests (two-phase timeout, _wait_for_vm_ssh, race conditions, broken tag, in_use check, on-broken script, repair flow, CancelledError handling)
+    ├── test_daemon.py: 74 tests (event filtering, stale tags, startup scan, stale scan loop, auto-exclude, broken_timeout/on_broken_delay init)
     ├── test_ssh_checker.py: 23 tests
     ├── test_event_monitor.py: 15 tests
     └── test_vm_tracker.py: 7 tests
@@ -430,7 +430,7 @@ Dennis Vestergaard Værum (github@varum.dk)
 
 **Project Quality Metrics:**
 
-- ✅ 100% test pass rate (388/388 tests)
+- ✅ 100% test pass rate (424/424 tests)
 - ✅ Comprehensive documentation (5,625+ lines)
 - ✅ Production-ready code quality
 - ✅ Professional project structure

@@ -44,7 +44,8 @@
   #   checkExisting = true;
   #   
   #   checkInterval = 5;
-  #   maxWaitTime = 300;  # 5 minutes max
+  #   brokenTimeout = 120;     # Tag broken after 2 minutes
+  #   onBrokenDelay = 180;     # Run repair script 3 minutes after broken tag
   #   
   #   logLevel = "debug";
   # };
@@ -83,7 +84,8 @@
   #   };
   #   
   #   checkInterval = 15;
-  #   maxWaitTime = 600;  # 10 minutes
+  #   brokenTimeout = 300;      # Tag broken after 5 minutes (default)
+  #   onBrokenDelay = 1500;     # Run repair script 25 minutes later (default)
   #   
   #   checkExisting = true;
   #   

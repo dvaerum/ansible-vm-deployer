@@ -1,14 +1,15 @@
 """
 Tag cleanup orchestration logic.
 
-Coordinates SSH checking and tag removal for VMs.
+Coordinates SSH checking and tag removal for VMs using a two-phase
+timeout to separate broken VM detection from repair.
 """
 
 import asyncio
 import logging
 import os
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import libvirt
 
 from vm_tools_common.vm_operations import get_vm_ip, get_vm_tags, remove_vm_tag, add_vm_tag
@@ -23,13 +24,19 @@ logger = logging.getLogger(__name__)
 class TagCleaner:
     """
     Orchestrates SSH checking and tag removal for VMs.
-    
-    When a VM starts, this class:
-    1. Gets the VM's IP address
-    2. Waits for SSH to become available
-    3. Removes the specified tag from the VM
+
+    Uses a two-phase timeout to separate broken VM detection from repair:
+
+    Phase 1 (broken_timeout): Wait for SSH to become available.
+        - Success → remove 'used' tag
+        - Timeout → add 'broken' tag, proceed to Phase 2
+
+    Phase 2 (on_broken_delay or indefinite):
+        - If on-broken script configured: wait on_broken_delay, then run script
+        - If broken_tag set but no script: monitor SSH indefinitely
+        - SSH recovery at any point → remove broken + used tags
     """
-    
+
     def __init__(
         self,
         conn: libvirt.virConnect,
@@ -37,6 +44,8 @@ class TagCleaner:
         vm_tracker: VMTracker,
         tags_to_remove: List[str],
         broken_tag: Optional[str] = None,
+        broken_timeout: int = 300,
+        on_broken_delay: int = 1500,
         on_broken: Optional[str] = None,
         on_broken_timeout: int = 300,
         on_broken_retries: Optional[int] = None,
@@ -45,37 +54,49 @@ class TagCleaner:
     ):
         """
         Initialize the tag cleaner.
-        
+
         Args:
             conn: Libvirt connection
             ssh_checker: SSH connectivity checker
             vm_tracker: VM session tracker
             tags_to_remove: List of tags to remove after SSH succeeds
             broken_tag: Tag to add when SSH times out (None = don't tag)
-            on_broken: Path to external script to run when a VM is marked broken (None = disabled)
-            on_broken_timeout: Seconds before killing the on-broken script (default: 300)
-            on_broken_retries: Max retries for on-broken script (None = unlimited)
-            on_broken_retry_delay: Seconds between on-broken retries (default: 60)
-            libvirt_uri: Libvirt connection URI (passed to on_broken script as env var)
+            broken_timeout: Seconds of SSH failure before adding broken tag
+                (default: 300). Phase 1 of two-phase timeout.
+            on_broken_delay: Seconds after broken tag before running on-broken
+                script (default: 1500). Phase 2 of two-phase timeout. SSH
+                monitoring continues during this delay.
+            on_broken: Path to external script to run when a VM is marked
+                broken (None = disabled)
+            on_broken_timeout: Seconds before killing the on-broken script
+                (default: 300)
+            on_broken_retries: Max retries for on-broken script
+                (None = unlimited)
+            on_broken_retry_delay: Seconds between on-broken retries
+                (default: 60)
+            libvirt_uri: Libvirt connection URI (passed to on_broken script
+                as env var)
         """
         self.conn = conn
         self.ssh_checker = ssh_checker
         self.vm_tracker = vm_tracker
         self.tags_to_remove = tags_to_remove
         self.broken_tag = broken_tag
+        self.broken_timeout = broken_timeout
+        self.on_broken_delay = on_broken_delay
         self.on_broken = on_broken
         self.on_broken_timeout = on_broken_timeout
         self.on_broken_retries = on_broken_retries
         self.on_broken_retry_delay = on_broken_retry_delay
         self.libvirt_uri = libvirt_uri
-    
+
     async def handle_vm_started(self, domain: libvirt.virDomain) -> None:
         """
         Handle a VM start event.
-        
+
         Creates a background task to wait for SSH and remove tags.
         Uses the VMTracker to prevent duplicate processing.
-        
+
         Args:
             domain: The libvirt domain that started
         """
@@ -85,19 +106,19 @@ class TagCleaner:
         except libvirt.libvirtError as e:
             logger.error(f"Failed to get VM info: {e}")
             return
-        
+
         # Create a task to monitor this VM (pass name/uuid, not domain object)
         task = asyncio.create_task(
             self._monitor_vm(vm_uuid, vm_name)
         )
-        
+
         # Register with tracker (debouncing)
         started = await self.vm_tracker.start_monitoring(vm_uuid, vm_name, task)
-        
+
         if not started:
             # Already being monitored - cancel this task
             task.cancel()
-    
+
     async def _get_vm_ip_with_retry(
         self,
         vm_name: str,
@@ -106,15 +127,15 @@ class TagCleaner:
     ) -> Optional[str]:
         """
         Get VM IP address with retry logic.
-        
+
         VMs may not have an IP immediately after starting (DHCP lease renewal).
         This retries a few times before giving up.
-        
+
         Args:
             vm_name: VM name
             max_attempts: Maximum number of attempts (default: 10)
             retry_interval: Seconds between attempts (default: 3)
-            
+
         Returns:
             IP address string, or None if not found after all attempts
         """
@@ -122,7 +143,7 @@ class TagCleaner:
             try:
                 # Look up domain fresh (thread-safe)
                 loop = asyncio.get_running_loop()
-                
+
                 def get_ip_for_vm():
                     """Helper to look up domain and get IP in executor thread"""
                     try:
@@ -130,16 +151,16 @@ class TagCleaner:
                         return get_vm_ip(domain, None)
                     except libvirt.libvirtError as e:
                         raise VMNotFoundException(f"VM {vm_name} not found: {e}")
-                
+
                 ip_address = await loop.run_in_executor(None, get_ip_for_vm)
-                
+
                 if ip_address:
                     logger.info(
                         f"Got IP address {ip_address} for VM {vm_name} "
                         f"(attempt {attempt}/{max_attempts})"
                     )
                     return ip_address
-                
+
                 # No valid IP yet (loopback addresses are filtered by get_vm_ip)
                 if attempt < max_attempts:
                     logger.debug(
@@ -153,7 +174,7 @@ class TagCleaner:
                         f"attempts over {max_attempts * retry_interval}s"
                     )
                     return None
-            
+
             except VMNotFoundException as e:
                 logger.error(f"Could not get IP for VM {vm_name}: {e}")
                 return None
@@ -166,176 +187,241 @@ class TagCleaner:
                     await asyncio.sleep(retry_interval)
                 else:
                     return None
-        
+
         return None
-    
+
+    async def _wait_for_vm_ssh(
+        self,
+        vm_name: str,
+        timeout: Optional[float],
+        existing_ip: Optional[str] = None
+    ) -> Tuple[Optional[str], str]:
+        """
+        Resolve VM IP and wait for SSH within the given timeout.
+
+        Combines IP resolution and SSH waiting into a single operation
+        with a shared time budget. If an existing IP is provided, IP
+        resolution is skipped.
+
+        Args:
+            vm_name: VM name
+            timeout: Maximum seconds to wait (None = wait indefinitely)
+            existing_ip: Previously resolved IP address (skip IP resolution)
+
+        Returns:
+            Tuple of (ip_address, result) where result is one of:
+            - "success": SSH connected and fresh boot confirmed
+            - "timeout": Timed out waiting for IP or SSH
+            - "auth_failure": SSH authentication failed (config error)
+            ip_address may be None if IP was never resolved.
+        """
+        start_time = datetime.now()
+        ip_address = existing_ip
+        ip_attempt_round = 0
+
+        # IP resolution loop (skip if we already have an IP)
+        while ip_address is None:
+            ip_attempt_round += 1
+            ip_address = await self._get_vm_ip_with_retry(vm_name)
+
+            if ip_address:
+                logger.info(f"VM {vm_name} has IP address {ip_address}")
+                break
+
+            # Check timeout
+            if timeout is not None:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                if elapsed >= timeout:
+                    logger.warning(
+                        f"VM {vm_name} has no IP address after {elapsed:.1f}s "
+                        f"({ip_attempt_round} rounds of IP resolution)"
+                    )
+                    return (None, "timeout")
+
+            logger.info(
+                f"VM {vm_name} has no IP address, will retry in "
+                f"{self.ssh_checker.check_interval}s "
+                f"(round {ip_attempt_round})"
+            )
+            await asyncio.sleep(self.ssh_checker.check_interval)
+
+        # SSH wait with remaining timeout budget
+        remaining = None
+        if timeout is not None:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            remaining = max(0, timeout - elapsed)
+
+        result = await self.ssh_checker.wait_for_ssh(
+            ip_address, vm_name, max_wait_time_override=remaining
+        )
+        return (ip_address, result)
+
     async def _monitor_vm(
         self,
         vm_uuid: str,
         vm_name: str
     ) -> None:
         """
-        Monitor a VM until SSH becomes available, then remove tags.
-        
-        IP resolution and SSH checking are both governed by max_wait_time.
-        If the VM never gets an IP within the timeout, it is marked broken
-        just like an SSH timeout.
-        
+        Monitor a VM through a two-phase timeout until SSH becomes available.
+
+        Phase 1 (broken_timeout seconds):
+            Wait for VM IP and SSH connectivity. If SSH succeeds, remove
+            the 'used' tag. If the timeout expires, add the 'broken' tag
+            and proceed to Phase 2.
+
+        Phase 2 (on_broken_delay seconds, or indefinite if no script):
+            Continue monitoring SSH. If SSH recovers, remove both broken
+            and used tags. If the timeout expires and an on-broken script
+            is configured, run the script.
+
         Args:
             vm_uuid: VM UUID
             vm_name: VM name
         """
         tracking_stopped = False
         try:
-            logger.info(f"Starting monitoring for VM {vm_name} (uuid={vm_uuid})")
-            
-            # Get the VM's IP address (with retry logic).
-            # If no IP is found within the short retry window, keep retrying
-            # as part of the overall max_wait_time budget. A VM that never
-            # gets an IP for 30 minutes is just as broken as one that never
-            # responds to SSH.
-            start_time = datetime.now()
-            ip_address = None
-            ip_attempt_round = 0
-            
-            while ip_address is None:
-                ip_attempt_round += 1
-                ip_address = await self._get_vm_ip_with_retry(vm_name)
-                
-                if ip_address:
-                    break
-                
-                # Check if we've exceeded max_wait_time
-                if self.ssh_checker.max_wait_time is not None:
-                    elapsed = (datetime.now() - start_time).total_seconds()
-                    if elapsed >= self.ssh_checker.max_wait_time:
-                        logger.warning(
-                            f"VM {vm_name} has no IP address after {elapsed:.1f}s "
-                            f"({ip_attempt_round} rounds of IP resolution), "
-                            "marking as broken"
-                        )
-                        await self._mark_vm_broken(vm_name, vm_uuid)
-                        # Free the tracker slot before running the on-broken
-                        # script, so if the script restarts the VM, a new
-                        # start event can create a fresh monitoring session.
-                        await self.vm_tracker.stop_monitoring(vm_uuid)
-                        tracking_stopped = True
-                        script_ok = await self._run_on_broken_script(
-                            vm_name, vm_uuid, None
-                        )
-                        if script_ok:
-                            await self._handle_successful_repair(
-                                vm_name, vm_uuid
-                            )
-                        return
-                
-                # Wait before retrying IP resolution
-                logger.info(
-                    f"VM {vm_name} has no IP address, will retry IP resolution "
-                    f"in {self.ssh_checker.check_interval}s "
-                    f"(round {ip_attempt_round})"
-                )
-                await asyncio.sleep(self.ssh_checker.check_interval)
-            
-            logger.info(f"VM {vm_name} has IP address {ip_address}")
-            
-            # Wait for SSH to become available.
-            # Subtract the time already spent on IP resolution from the
-            # remaining budget so the total doesn't exceed max_wait_time.
-            remaining_time = None
-            if self.ssh_checker.max_wait_time is not None:
-                elapsed_for_ip = (datetime.now() - start_time).total_seconds()
-                remaining_time = max(0, self.ssh_checker.max_wait_time - elapsed_for_ip)
-            
-            ssh_result = await self.ssh_checker.wait_for_ssh(
-                ip_address, vm_name, max_wait_time_override=remaining_time
+            logger.info(
+                f"Starting monitoring for VM {vm_name} (uuid={vm_uuid}), "
+                f"broken_timeout={self.broken_timeout}s, "
+                f"on_broken_delay={self.on_broken_delay}s"
             )
-            
-            if ssh_result == "timeout":
-                logger.warning(
-                    f"SSH check timed out for VM {vm_name} ({ip_address}), "
-                    "VM may be broken"
+
+            # ── Phase 1: Wait for SSH within broken_timeout ──────────
+            ip, result = await self._wait_for_vm_ssh(
+                vm_name, self.broken_timeout
+            )
+
+            if result == "success":
+                logger.info(
+                    f"VM {vm_name} SSH succeeded (Phase 1), "
+                    "checking in-use status"
                 )
-                await self._mark_vm_broken(vm_name, vm_uuid)
-                # Free the tracker slot before running the on-broken
-                # script (same rationale as the no-IP case above).
-                await self.vm_tracker.stop_monitoring(vm_uuid)
-                tracking_stopped = True
+                # Wait a few seconds to ensure ansible-deployer has fully
+                # exited (ansible-deployer's reset_vm() is non-blocking —
+                # it initiates reboot and immediately calls mark_available(),
+                # so metadata is cleared before the VM finishes rebooting).
+                await asyncio.sleep(5)
+                if await self._is_vm_in_use(vm_name):
+                    logger.info(
+                        f"VM {vm_name} is still actively in use by "
+                        "ansible-deployer, skipping tag removal"
+                    )
+                    return
+                await self._remove_tags(vm_name, vm_uuid)
+                return
+
+            if result == "auth_failure":
+                logger.warning(
+                    f"SSH authentication failed for VM {vm_name}, "
+                    "not removing tags"
+                )
+                return
+
+            # ── Phase 1 timed out → mark VM as broken ───────────────
+            logger.warning(
+                f"VM {vm_name} SSH timed out after {self.broken_timeout}s "
+                "(Phase 1), marking as broken"
+            )
+            await self._mark_vm_broken(vm_name, vm_uuid)
+
+            # Free tracker slot before Phase 2. This allows new monitoring
+            # sessions if the VM is restarted externally. The broken tag
+            # in exclude_tags prevents duplicate monitoring.
+            await self.vm_tracker.stop_monitoring(vm_uuid)
+            tracking_stopped = True
+
+            # ── Phase 2: Continue monitoring SSH ─────────────────────
+            if self.on_broken:
+                phase2_timeout = self.on_broken_delay
+                logger.info(
+                    f"Phase 2: monitoring VM {vm_name} SSH for "
+                    f"{self.on_broken_delay}s before running on-broken script"
+                )
+            elif self.broken_tag:
+                phase2_timeout = None
+                logger.info(
+                    f"Phase 2: monitoring VM {vm_name} SSH indefinitely "
+                    "(no on-broken script configured)"
+                )
+            else:
+                # No script and no broken tag → nothing more to do
+                return
+
+            ip2, result2 = await self._wait_for_vm_ssh(
+                vm_name, phase2_timeout, existing_ip=ip
+            )
+
+            if result2 == "success":
+                logger.info(
+                    f"VM {vm_name} recovered during Phase 2, "
+                    "removing broken and used tags"
+                )
+                await self._remove_broken_tag(vm_name, vm_uuid)
+                await asyncio.sleep(5)
+                if await self._is_vm_in_use(vm_name):
+                    logger.info(
+                        f"VM {vm_name} is still actively in use, "
+                        "skipping used tag removal "
+                        "(broken tag already removed)"
+                    )
+                    return
+                await self._remove_tags(vm_name, vm_uuid)
+                return
+
+            if result2 == "timeout" and self.on_broken:
+                total_wait = self.broken_timeout + self.on_broken_delay
+                logger.warning(
+                    f"VM {vm_name} SSH still failing after "
+                    f"{total_wait}s total, running on-broken script"
+                )
                 script_ok = await self._run_on_broken_script(
-                    vm_name, vm_uuid, ip_address
+                    vm_name, vm_uuid, ip2 or ip
                 )
                 if script_ok:
                     await self._handle_successful_repair(vm_name, vm_uuid)
                 return
-            
-            if ssh_result != "success":
+
+            # auth_failure or unexpected result in Phase 2
+            if result2 != "timeout":
                 logger.warning(
-                    f"SSH check failed for VM {vm_name} ({ip_address}): "
-                    f"{ssh_result}, not removing tags"
+                    f"SSH check for VM {vm_name} returned '{result2}' "
+                    "during Phase 2, giving up"
                 )
-                return
-            
-            # SSH succeeded and fresh boot confirmed
-            # Wait a few seconds to ensure ansible-deployer has fully exited
-            # (ansible-deployer's reset_vm() is non-blocking - it initiates reboot
-            # and immediately calls mark_available(), so metadata is cleared before
-            # the VM finishes rebooting. By waiting here, we ensure the ansible-deployer
-            # process has completed its cleanup and exited.)
-            logger.debug(
-                f"Waiting 5 seconds before removing tags from {vm_name} "
-                "to ensure ansible-deployer cleanup is complete"
-            )
-            await asyncio.sleep(5)
-            
-            # Check if VM is still actively in use by ansible-deployer.
-            # A playbook may reboot the VM mid-run (e.g., OS install), which
-            # triggers vm-manager to start monitoring. But the deployer is still
-            # orchestrating the VM - removing the 'used' tag now would allow
-            # another deployer to allocate it concurrently.
-            if await self._is_vm_in_use(vm_name):
-                logger.info(
-                    f"VM {vm_name} is still actively in use by ansible-deployer, "
-                    "skipping tag removal"
-                )
-                return
-            
-            # Now remove tags
-            await self._remove_tags(vm_name, vm_uuid)
-        
+
         except asyncio.CancelledError:
             logger.info(f"Monitoring cancelled for VM {vm_name}")
             raise
-        
+
         except Exception as e:
             logger.error(
                 f"Unexpected error monitoring VM {vm_name}: {e}",
                 exc_info=True
             )
-        
+
         finally:
             # Stop tracking this VM when done — unless we already freed
-            # the slot before running the on-broken script (to allow the
-            # script to restart the VM without debounce conflicts).
+            # the slot before Phase 2 (to allow new monitoring sessions
+            # if the VM is restarted externally).
             if not tracking_stopped:
                 await self.vm_tracker.stop_monitoring(vm_uuid)
-    
+
 
     async def _is_vm_in_use(self, vm_name: str) -> bool:
         """
         Check if a VM is actively in use by ansible-deployer.
-        
+
         Reads the VM's metadata to check the in_use flag. This prevents
         removing the 'used' tag while a deployer session is still active
         (e.g., the playbook rebooted the VM mid-run).
-        
+
         Args:
             vm_name: VM name
-            
+
         Returns:
             True if VM has in_use=true in metadata, False otherwise
         """
         loop = asyncio.get_running_loop()
-        
+
         try:
             def check_in_use():
                 """Helper to check metadata in executor thread"""
@@ -346,9 +432,9 @@ class TagCleaner:
                 except libvirt.libvirtError as e:
                     logger.warning(f"Failed to check in_use for {vm_name}: {e}")
                     return False
-            
+
             return await loop.run_in_executor(None, check_in_use)
-        
+
         except Exception as e:
             logger.warning(f"Error checking in_use for {vm_name}: {e}")
             # On error, assume not in use to avoid blocking tag removal forever
@@ -361,16 +447,16 @@ class TagCleaner:
     ) -> None:
         """
         Handle post-repair actions after an on-broken script succeeds.
-        
+
         Removes the broken tag so the VM can be monitored again, then
         triggers a fresh monitoring session. The on-broken script typically
         restarts the VM (e.g., reset-vm-disks.sh), so by this point the VM
         is running with fresh disks. Re-monitoring will wait for SSH and
         then remove the 'used' tag.
-        
+
         If re-monitoring cannot be triggered (e.g., VM no longer exists),
         the stale tag scan will eventually clean up.
-        
+
         Args:
             vm_name: VM name
             vm_uuid: VM UUID
@@ -398,25 +484,25 @@ class TagCleaner:
     ) -> None:
         """
         Remove the broken tag from a VM after successful repair.
-        
+
         Called after the on-broken script succeeds so the VM can be
         re-monitored and eventually have its 'used' tag removed.
-        
+
         Args:
             vm_name: VM name
             vm_uuid: VM UUID
         """
         if not self.broken_tag:
             return
-        
+
         loop = asyncio.get_running_loop()
-        
+
         try:
             logger.info(
                 f"Removing broken tag '{self.broken_tag}' from VM "
                 f"{vm_name} (uuid={vm_uuid}) after successful repair"
             )
-            
+
             def do_remove_broken_tag():
                 """Helper to look up domain and remove broken tag in executor thread"""
                 try:
@@ -424,14 +510,14 @@ class TagCleaner:
                     remove_vm_tag(self.conn, domain, self.broken_tag)
                 except libvirt.libvirtError as e:
                     raise Exception(f"Failed to remove broken tag: {e}") from e
-            
+
             await loop.run_in_executor(None, do_remove_broken_tag)
-            
+
             logger.info(
                 f"Successfully removed broken tag '{self.broken_tag}' "
                 f"from VM {vm_name}"
             )
-        
+
         except Exception as e:
             logger.error(
                 f"Failed to remove broken tag from VM {vm_name}: {e}",
@@ -445,11 +531,11 @@ class TagCleaner:
     ) -> None:
         """
         Mark a VM as broken by adding the broken tag.
-        
-        Called when SSH times out after max_wait_time. The 'used' tag is
-        intentionally NOT removed so the VM stays reserved and won't be
-        reallocated by ansible-deployer.
-        
+
+        Called when SSH times out after broken_timeout (Phase 1). The 'used'
+        tag is intentionally NOT removed so the VM stays reserved and won't
+        be reallocated by ansible-deployer.
+
         Args:
             vm_name: VM name
             vm_uuid: VM UUID
@@ -460,15 +546,15 @@ class TagCleaner:
                 "VM will keep its current tags"
             )
             return
-        
+
         loop = asyncio.get_running_loop()
-        
+
         try:
             logger.warning(
                 f"Marking VM {vm_name} as broken (adding tag '{self.broken_tag}'). "
                 f"The 'used' tag is intentionally kept so the VM won't be reallocated."
             )
-            
+
             def add_broken_tag():
                 """Helper to look up domain and add broken tag in executor thread"""
                 try:
@@ -476,14 +562,14 @@ class TagCleaner:
                     add_vm_tag(self.conn, domain, self.broken_tag)
                 except libvirt.libvirtError as e:
                     raise Exception(f"Failed to add broken tag: {e}") from e
-            
+
             await loop.run_in_executor(None, add_broken_tag)
-            
+
             logger.warning(
                 f"Successfully marked VM {vm_name} as broken "
                 f"(tag '{self.broken_tag}' added)"
             )
-        
+
         except Exception as e:
             logger.error(
                 f"Failed to mark VM {vm_name} as broken: {e}",
@@ -498,35 +584,35 @@ class TagCleaner:
     ) -> bool:
         """
         Run the external on-broken script with VM information as environment variables.
-        
+
         Retries on failure (non-zero exit or timeout) according to on_broken_retries
         and on_broken_retry_delay. If on_broken_retries is None, retries forever.
-        
+
         Environment variables passed to the script:
             VM_NAME: VM name
             VM_UUID: Libvirt UUID
             VM_IP: Last known IP address (empty if unavailable)
             VM_TAGS: Comma-separated list of current tags
             VM_BROKEN_TAG: The broken tag that was added
-            VM_WAIT_TIME: Max wait time in seconds
+            VM_WAIT_TIME: Total wait time before script (broken_timeout + on_broken_delay)
             LIBVIRT_URI: Libvirt connection URI
-        
+
         Args:
             vm_name: VM name
             vm_uuid: VM UUID
             ip_address: Last known IP address (may be None)
-            
+
         Returns:
             True if script succeeded, False if no script configured or
             retries exhausted
         """
         if not self.on_broken:
             return False
-        
+
         try:
             # Gather VM tags
             loop = asyncio.get_running_loop()
-            
+
             def get_tags():
                 try:
                     domain = self.conn.lookupByName(vm_name)
@@ -537,9 +623,9 @@ class TagCleaner:
                         f"(for on-broken script env): {e}"
                     )
                     return []
-            
+
             vm_tags = await loop.run_in_executor(None, get_tags)
-            
+
             # Build environment for the script
             env = os.environ.copy()
             env.update({
@@ -548,27 +634,27 @@ class TagCleaner:
                 "VM_IP": ip_address or "",
                 "VM_TAGS": ",".join(vm_tags),
                 "VM_BROKEN_TAG": self.broken_tag or "",
-                "VM_WAIT_TIME": str(self.ssh_checker.max_wait_time or ""),
+                "VM_WAIT_TIME": str(self.broken_timeout + self.on_broken_delay),
                 "LIBVIRT_URI": self.libvirt_uri,
             })
-            
+
             attempt = 0
             while True:
                 attempt += 1
                 retry_label = f" (attempt {attempt})" if attempt > 1 else ""
-                
+
                 logger.info(
                     f"Running on-broken script '{self.on_broken}' "
                     f"for VM {vm_name}{retry_label}"
                 )
-                
+
                 success = await self._execute_on_broken_script(
                     vm_name, env
                 )
-                
+
                 if success:
                     return True
-                
+
                 # Check if we've exhausted retries
                 if self.on_broken_retries is not None and attempt >= self.on_broken_retries + 1:
                     logger.error(
@@ -576,25 +662,25 @@ class TagCleaner:
                         f"{attempt} attempt(s), giving up"
                     )
                     return False
-                
+
                 # Wait before retrying
                 retry_desc = ""
                 if self.on_broken_retries is not None:
                     remaining = self.on_broken_retries + 1 - attempt
                     retry_desc = f" ({remaining} retries remaining)"
-                
+
                 logger.info(
                     f"Retrying on-broken script for VM {vm_name} "
                     f"in {self.on_broken_retry_delay}s{retry_desc}"
                 )
                 await asyncio.sleep(self.on_broken_retry_delay)
-        
+
         except asyncio.CancelledError:
             logger.info(
                 f"On-broken script retry loop cancelled for VM {vm_name}"
             )
             raise
-        
+
         except Exception as e:
             logger.error(
                 f"Failed to run on-broken script for VM {vm_name}: {e}",
@@ -609,11 +695,11 @@ class TagCleaner:
     ) -> bool:
         """
         Execute the on-broken script once.
-        
+
         Args:
             vm_name: VM name (for logging)
             env: Environment variables for the script
-            
+
         Returns:
             True if script succeeded (exit code 0), False otherwise
         """
@@ -625,7 +711,7 @@ class TagCleaner:
                 stderr=asyncio.subprocess.PIPE,
                 env=env
             )
-            
+
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(),
@@ -640,7 +726,7 @@ class TagCleaner:
                 process.kill()
                 await process.wait()
                 return False
-            
+
             if stdout:
                 logger.debug(
                     f"On-broken script stdout for {vm_name}: "
@@ -651,19 +737,19 @@ class TagCleaner:
                     f"On-broken script stderr for {vm_name}: "
                     f"{stderr.decode('utf-8', errors='replace').strip()}"
                 )
-            
+
             if process.returncode != 0:
                 logger.warning(
                     f"On-broken script '{self.on_broken}' for VM {vm_name} "
                     f"exited with code {process.returncode}"
                 )
                 return False
-            
+
             logger.info(
                 f"On-broken script completed successfully for VM {vm_name}"
             )
             return True
-        
+
         except asyncio.CancelledError:
             # Kill the child process to avoid orphans when the daemon shuts down
             if process is not None and process.returncode is None:
@@ -677,7 +763,7 @@ class TagCleaner:
                 except Exception:
                     pass
             raise
-        
+
         except Exception as e:
             logger.error(
                 f"Failed to execute on-broken script for VM {vm_name}: {e}",
@@ -692,7 +778,7 @@ class TagCleaner:
     ) -> None:
         """
         Remove the configured tags from a VM.
-        
+
         Args:
             vm_name: VM name
             vm_uuid: VM UUID (for logging)
@@ -700,11 +786,11 @@ class TagCleaner:
         # Use run_in_executor to run libvirt calls in thread pool
         # (libvirt is synchronous, but we're in an async context)
         loop = asyncio.get_running_loop()
-        
+
         for tag in self.tags_to_remove:
             try:
                 logger.info(f"Removing tag '{tag}' from VM {vm_name}")
-                
+
                 def remove_tag_for_vm():
                     """Helper to look up domain and remove tag in executor thread"""
                     try:
@@ -712,12 +798,12 @@ class TagCleaner:
                         remove_vm_tag(self.conn, domain, tag)
                     except libvirt.libvirtError as e:
                         raise Exception(f"Failed to remove tag: {e}") from e
-                
+
                 # Run in thread pool to avoid blocking
                 await loop.run_in_executor(None, remove_tag_for_vm)
-                
+
                 logger.info(f"Successfully removed tag '{tag}' from VM {vm_name}")
-            
+
             except Exception as e:
                 logger.error(
                     f"Failed to remove tag '{tag}' from VM {vm_name}: {e}",

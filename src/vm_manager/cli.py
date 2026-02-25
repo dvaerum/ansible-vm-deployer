@@ -27,8 +27,8 @@ Examples:
   # With boot at start
   vm-manager --tag used --ssh-username root --ssh-key ~/.ssh/id_rsa --boot-at-start
 
-  # With max wait time
-  vm-manager --tag used --ssh-username ansible --ssh-key /keys/ansible.key --max-wait-time 300
+  # With custom broken timeout (mark broken after 10 minutes)
+  vm-manager --tag used --ssh-username root --ssh-key ~/.ssh/id_rsa --broken-timeout 600
 
   # Check existing running VMs
   vm-manager --tag used --ssh-username root --ssh-key ~/.ssh/id_rsa --check-existing
@@ -102,11 +102,24 @@ Examples:
         help="Interval between SSH checks in seconds (default: 10)"
     )
     parser.add_argument(
-        "--max-wait-time",
+        "--broken-timeout",
         type=int,
-        default=1800,
+        default=300,
         metavar="SECONDS",
-        help="Maximum time to wait for SSH in seconds (default: 1800 = 30 minutes)"
+        help="Time in seconds to wait for SSH before marking VM as broken "
+             "(default: 300 = 5 minutes). Phase 1 of two-phase timeout. "
+             "Set to 0 for immediate broken tag."
+    )
+    parser.add_argument(
+        "--on-broken-delay",
+        type=int,
+        default=1500,
+        metavar="SECONDS",
+        help="Time in seconds to wait after marking VM broken before running "
+             "the on-broken script (default: 1500 = 25 minutes). Phase 2 of "
+             "two-phase timeout. SSH monitoring continues during this time; "
+             "if SSH recovers, the broken tag is removed and no script runs. "
+             "Set to 0 to run script immediately after broken tag."
     )
 
     # Broken VM tagging
@@ -114,7 +127,7 @@ Examples:
         "--broken-tag",
         default="broken",
         metavar="TAG",
-        help="Tag to add to VMs that fail SSH after max-wait-time (default: 'broken'). "
+        help="Tag to add to VMs that fail SSH after broken-timeout (default: 'broken'). "
              "Use --no-broken-tag to disable."
     )
     parser.add_argument(
@@ -203,6 +216,12 @@ Examples:
     if args.ssh_password_file and not args.ssh_password_file.exists():
         parser.error(f"Password file not found: {args.ssh_password_file}")
 
+    # Validate timing options
+    if args.broken_timeout < 0:
+        parser.error("--broken-timeout must be a non-negative integer")
+    if args.on_broken_delay < 0:
+        parser.error("--on-broken-delay must be a non-negative integer")
+
     # Validate stale-scan-interval is non-negative
     if args.stale_scan_interval < 0:
         parser.error("--stale-scan-interval must be a non-negative integer (0 to disable)")
@@ -242,19 +261,28 @@ Examples:
     if args.ssh_password_file:
         logger.info(f"SSH password file: {args.ssh_password_file}")
     logger.info(f"Check interval: {args.check_interval}s")
-    if args.max_wait_time is not None and args.max_wait_time > 0:
-        logger.info(f"Max wait time: {args.max_wait_time}s ({args.max_wait_time // 60} minutes)")
-    else:
-        logger.info("Max wait time: infinite")
-    
+    logger.info(
+        f"Broken timeout: {args.broken_timeout}s "
+        f"({args.broken_timeout // 60}m {args.broken_timeout % 60}s)"
+    )
+    logger.info(
+        f"On-broken delay: {args.on_broken_delay}s "
+        f"({args.on_broken_delay // 60}m {args.on_broken_delay % 60}s)"
+    )
+    total_wait = args.broken_timeout + args.on_broken_delay
+    logger.info(
+        f"Total wait before on-broken script: {total_wait}s "
+        f"({total_wait // 60}m {total_wait % 60}s)"
+    )
+
     # Determine broken tag
     broken_tag: Optional[str] = None
     if not args.no_broken_tag:
         broken_tag = args.broken_tag
-        logger.info(f"Broken tag: '{broken_tag}' (added to VMs that fail SSH after timeout)")
+        logger.info(f"Broken tag: '{broken_tag}' (added to VMs that fail SSH after broken timeout)")
     else:
         logger.info("Broken tag: disabled")
-    
+
     # Determine on-broken script and its options
     on_broken: Optional[str] = None
     if args.on_broken:
@@ -266,7 +294,7 @@ Examples:
         else:
             logger.info("On-broken retries: unlimited")
         logger.info(f"On-broken retry delay: {args.on_broken_retry_delay}s")
-    
+
     if args.stale_scan_interval > 0:
         interval = args.stale_scan_interval
         if interval >= 60:
@@ -275,7 +303,7 @@ Examples:
             logger.info(f"Stale tag scan interval: {interval}s")
     else:
         logger.info("Stale tag scan: disabled")
-    
+
     logger.info(f"Libvirt URI: {args.libvirt_uri}")
 
     # Determine tags to remove
@@ -288,7 +316,7 @@ Examples:
         # Flag not provided, remove the monitored tags
         tags_to_remove = args.tag
         logger.info(f"Will remove monitored tags: {', '.join(tags_to_remove)}")
-    
+
     # Read SSH password if provided
     ssh_password: Optional[str] = None
     if args.ssh_password_file:
@@ -297,7 +325,7 @@ Examples:
         except Exception as e:
             logger.error(f"Failed to read password file: {e}")
             return 1
-    
+
     # Build SSH config
     ssh_config = SSHConfig(
         username=args.ssh_username,
@@ -305,7 +333,7 @@ Examples:
         password=ssh_password,
         port=22
     )
-    
+
     # Run the daemon
     try:
         asyncio.run(run_daemon(
@@ -315,11 +343,12 @@ Examples:
             exclude_tags=args.exclude_tag or [],
             tags_to_remove=tags_to_remove,
             check_interval=args.check_interval,
-            max_wait_time=args.max_wait_time,
             check_existing=args.check_existing,
             boot_at_start=args.boot_at_start,
             boot_always=args.boot_always,
             broken_tag=broken_tag,
+            broken_timeout=args.broken_timeout,
+            on_broken_delay=args.on_broken_delay,
             on_broken=on_broken,
             on_broken_timeout=args.on_broken_timeout,
             on_broken_retries=args.on_broken_retries,

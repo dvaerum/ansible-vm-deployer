@@ -28,7 +28,8 @@ let
       
       # Timing options
       ++ [ "--check-interval ${toString cfg.checkInterval}" ]
-      ++ optional (cfg.maxWaitTime != null) "--max-wait-time ${toString cfg.maxWaitTime}"
+      ++ [ "--broken-timeout ${toString cfg.brokenTimeout}" ]
+      ++ [ "--on-broken-delay ${toString cfg.onBrokenDelay}" ]
       
       # Broken VM tagging
       ++ (if cfg.brokenTag != null
@@ -145,13 +146,31 @@ in {
       description = "Interval between SSH retry attempts in seconds.";
     };
 
-    maxWaitTime = mkOption {
-      type = types.nullOr types.ints.positive;
-      default = 1800;
-      example = 300;
+    brokenTimeout = mkOption {
+      type = types.ints.unsigned;
+      default = 300;
+      example = 600;
       description = ''
-        Maximum time to wait for SSH in seconds. Defaults to 1800 (30 minutes).
-        If null, wait indefinitely (not recommended).
+        Time in seconds to wait for SSH before marking the VM as broken.
+        Phase 1 of the two-phase timeout: SSH is retried every check-interval
+        seconds. If SSH fails after this timeout, the broken tag is added
+        and Phase 2 begins. Set to 0 for immediate broken tagging.
+        Default: 300 (5 minutes).
+      '';
+    };
+
+    onBrokenDelay = mkOption {
+      type = types.ints.unsigned;
+      default = 1500;
+      example = 900;
+      description = ''
+        Time in seconds to wait after marking a VM broken before running the
+        on-broken script. Phase 2 of the two-phase timeout: SSH monitoring
+        continues during this delay. If SSH succeeds, the broken tag is removed
+        and the VM returns to normal. Only relevant when onBroken is set;
+        without a script, broken VMs are monitored indefinitely.
+        Set to 0 to run the script immediately after the broken tag.
+        Default: 1500 (25 minutes).
       '';
     };
 
@@ -160,7 +179,7 @@ in {
       default = "broken";
       example = "needs-repair";
       description = ''
-        Tag to add to VMs that fail SSH after maxWaitTime. The 'used' tag is
+        Tag to add to VMs that fail SSH after brokenTimeout. The 'used' tag is
         kept so the VM won't be reallocated. Set to null to disable broken tagging.
       '';
     };

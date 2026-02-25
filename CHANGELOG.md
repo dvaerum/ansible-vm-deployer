@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - VM Manager (Two-Phase Broken VM Timeout)
+
+- **Two-phase timeout replaces single `--max-wait-time`** — The broken VM detection and repair script are now on independent, configurable timers. Previously, both the `broken` tag and the `--on-broken` repair script triggered simultaneously after `--max-wait-time` (default 30 minutes). This allowed broken VMs to be re-allocated during the entire wait window. The new design splits this into two phases:
+
+  **Phase 1 — Broken detection** (`--broken-timeout`, default 300s/5min): SSH is retried every 15 seconds. If SSH fails for `broken_timeout` seconds, the VM is tagged `broken` (preventing re-allocation by ansible-deployer). The `used` tag is kept.
+
+  **Phase 2 — Repair delay** (`--on-broken-delay`, default 1500s/25min): SSH monitoring continues. If SSH recovers, both `broken` and `used` tags are removed (self-healing). If SSH still fails after `on_broken_delay` seconds, the `--on-broken` repair script runs.
+
+  Without `--on-broken` script: VM is tagged `broken` after Phase 1, then monitored indefinitely (SSH retried every 15s). If SSH recovers at any point, tags are removed.
+
+  **CLI changes:**
+  - Removed: `--max-wait-time`
+  - Added: `--broken-timeout SECONDS` (default: 300)
+  - Added: `--on-broken-delay SECONDS` (default: 1500)
+  - Total default wait before script: 300+1500=1800s (matches old `--max-wait-time` default)
+
+  **NixOS module changes:**
+  - Removed: `services.vm-manager.maxWaitTime`
+  - Added: `services.vm-manager.brokenTimeout` (default: 300)
+  - Added: `services.vm-manager.onBrokenDelay` (default: 1500)
+
+  **Environment variable:** `VM_WAIT_TIME` passed to `--on-broken` script is now set to `broken_timeout + on_broken_delay` (total wait before script runs).
+
+- **New `_wait_for_vm_ssh()` helper** — Combines IP resolution and SSH waiting into a single operation with a shared time budget. Called twice by `_monitor_vm`: once for Phase 1 (broken detection) and once for Phase 2 (repair delay). Returns `(ip_address, result)` tuple.
+
+### Changed - Test Suite (Two-Phase Timeout Coverage)
+
+- **36 new tests for two-phase broken VM timeout** — `test_tag_cleaner.py` rewritten with 8 test classes (59 → 91 tests) covering: Phase 1 success/timeout, Phase 2 recovery/timeout, script execution, no-script indefinite monitoring, edge cases (`broken_timeout=0`, `on_broken_delay=0`), auth_failure handling, tracker management between phases, in-use checks, cancellation, and constructor parameter validation. `test_daemon.py` updated with 4 new tests (70 → 74) for `broken_timeout`/`on_broken_delay` storage and defaults. Total: 424 tests (214 shared/deployer + 210 vm-manager), 100% pass rate.
+
 ### Fixed - Shared Library (Production Bug)
 
 - **Fix: Tag modifications silently revert on running VMs** — `add_vm_tag()` and `remove_vm_tag()` used `XMLDesc(VIR_DOMAIN_XML_INACTIVE)` + `conn.defineXML()` which only updates the persistent (inactive) XML config. On running VMs, the live config is separate, and libvirt can overwrite persistent changes from the live config, causing tag modifications to silently revert. Now uses `domain.setMetadata(VIR_DOMAIN_METADATA_DESCRIPTION, ...)` with `VIR_DOMAIN_AFFECT_CONFIG | VIR_DOMAIN_AFFECT_LIVE` flags for running VMs and `VIR_DOMAIN_AFFECT_CONFIG` for shutoff VMs. `get_vm_tags()` uses the metadata API with XML fallback for robustness. The `conn` parameter in `add_vm_tag()`/`remove_vm_tag()` is now unused but kept for API compatibility.
@@ -17,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed - Test Suite (Bug Fix Coverage)
 
-- **5 new tests for setMetadata and stale scan bug fixes** — Added tests verifying: metadata API is used for tag operations, XML fallback when metadata API fails, `AFFECT_LIVE | AFFECT_CONFIG` flags used for active VMs, `AFFECT_CONFIG` only for shutoff VMs, and stale VMs routed through SSH monitoring instead of direct tag removal. Updated mock infrastructure (`make_mock_domain()` in conftest.py) to support `domain.metadata()` dispatch by type, `domain.isActive()`, and `domain.setMetadata()`. Replaced all `conn.defineXML` assertions with `domain.setMetadata` assertions in `test_vm_operations.py`. Total: 388 tests (214 shared/deployer + 174 vm-manager), 100% pass rate.
+- **5 new tests for setMetadata and stale scan bug fixes** — Added tests verifying: metadata API is used for tag operations, XML fallback when metadata API fails, `AFFECT_LIVE | AFFECT_CONFIG` flags used for active VMs, `AFFECT_CONFIG` only for shutoff VMs, and stale VMs routed through SSH monitoring instead of direct tag removal. Updated mock infrastructure (`make_mock_domain()` in conftest.py) to support `domain.metadata()` dispatch by type, `domain.isActive()`, and `domain.setMetadata()`. Replaced all `conn.defineXML` assertions with `domain.setMetadata` assertions in `test_vm_operations.py`.
 
 ### Added - Ansible Deployer
 
@@ -106,7 +135,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
 
 ### Added - VM Manager (cont.)
 
-- **Broken VM tagging** — VMs that fail SSH after `--max-wait-time` (default: 30 minutes) are now tagged with a configurable `--broken-tag` (default: `broken`) instead of retrying forever. The `used` tag is intentionally kept so the VM won't be reallocated by ansible-deployer.
+- **Broken VM tagging** — VMs that fail SSH after the broken timeout are now tagged with a configurable `--broken-tag` (default: `broken`) instead of retrying forever. The `used` tag is intentionally kept so the VM won't be reallocated by ansible-deployer. *(Note: `--max-wait-time` has been replaced by `--broken-timeout` + `--on-broken-delay` — see [Unreleased] above.)*
   - New CLI options: `--broken-tag TAG` (default: `broken`), `--no-broken-tag`
   - New NixOS option: `services.vm-manager.brokenTag` (default: `"broken"`)
 
@@ -128,7 +157,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
 
 - **`scripts/reset-vm-disks.sh`** — New on-broken script for resetting VM disks. Handles both file-backed disks (`<source file=.../>`) and pool-backed volumes (`<source pool=... volume=.../>`). Parses VM inactive XML directly, force-stops the VM (broken VMs are unresponsive, so graceful ACPI shutdown is unreliable), recreates disks at their original size, and restarts the VM.
 
-- **Default SSH timeout** — `--max-wait-time` now defaults to 1800 seconds (30 minutes) instead of infinite. This prevents unbounded resource accumulation from monitors that can never succeed.
+- **Default SSH timeout** — `--max-wait-time` now defaults to 1800 seconds (30 minutes) instead of infinite. This prevents unbounded resource accumulation from monitors that can never succeed. *(Note: `--max-wait-time` has been replaced by `--broken-timeout` + `--on-broken-delay` — see [Unreleased] above.)*
   - NixOS option `services.vm-manager.maxWaitTime` default changed from `null` to `1800`
 
 ### Changed - VM Manager
@@ -231,7 +260,7 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
   - Troubleshooting guide
 
 #### Test Suite
-- **388 comprehensive unit tests** covering multi-host libvirt connections, all 7 race condition fixes, broken tag feature, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), repair flow, CancelledError handling, stale tag scanning, and setMetadata API usage:
+- **424 comprehensive unit tests** covering multi-host libvirt connections, all 7 race condition fixes, two-phase broken VM timeout, auto-exclude behavior, `--on-broken` script hook (with retry/timeout), repair flow, CancelledError handling, stale tag scanning, and setMetadata API usage:
   - `tests/conftest.py`: Shared fixtures (`make_mock_domain()`, `make_mock_conn()`)
   - `tests/test_integration.py`: 45 tests (config, VMManager multi-host, executor, metadata, workflow)
   - `tests/test_allocate_vms.py`: 43 tests (VM allocation, multi-host allocation, auto-exclude broken)
@@ -240,13 +269,13 @@ All fixes were validated with 10 consecutive stress test runs (80 parallel ansib
   - `tests/test_log_prefix.py`: 20 tests (prefix sanitization, subdirectory creation, repeat suffixes)
   - `tests/test_tag_filters.py`: 14 tests (`vm_matches_tags()` — required/exclude tags)
   - `tests/test_vm_manager.py`: 1 test (connect() handle leak regression)
-  - `tests/vm_manager/test_daemon.py`: 70 tests (event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag, on-broken timeout/retries/delay init)
-  - `tests/vm_manager/test_tag_cleaner.py`: 59 tests (tag removal orchestration, race conditions #3/#6/#7, broken tagging, in_use check, on-broken script hook, retry logic, configurable timeout, return values, repair flow, CancelledError handling)
+  - `tests/vm_manager/test_tag_cleaner.py`: 91 tests (two-phase timeout, `_wait_for_vm_ssh`, race conditions, broken tagging, in_use check, on-broken script, repair flow, CancelledError handling)
+  - `tests/vm_manager/test_daemon.py`: 74 tests (event filtering, stale tags, startup scan, stale scan loop, auto-exclude, broken_timeout/on_broken_delay init)
   - `tests/vm_manager/test_ssh_checker.py`: 23 tests (uptime verification, string return values)
   - `tests/vm_manager/test_event_monitor.py`: 15 tests (reboot callback registration)
   - `tests/vm_manager/test_vm_tracker.py`: 7 tests (session management, debouncing)
 - **8 manual tests**: All scenarios validated with real VMs
-- **100% test pass rate**: 388/388 total tests
+- **100% test pass rate**: 424/424 total tests
 - **Mocked dependencies**: No real VMs or libvirt connection needed for unit tests
 
 #### Bug Fixes (During Development)

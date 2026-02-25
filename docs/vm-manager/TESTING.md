@@ -17,7 +17,7 @@ Comprehensive testing documentation for VM Manager, covering unit tests, manual 
 
 ### Test Coverage
 
-The project has **388 comprehensive unit tests** (214 shared/deployer + 174 vm-manager) covering all core functionality, multi-host libvirt connections, race condition fixes, broken VM handling, auto-exclude behavior, the `--on-broken` script hook (with retry/timeout/repair flow), CancelledError handling, stale tag scanning, and setMetadata API usage:
+The project has **424 comprehensive unit tests** (214 shared/deployer + 210 vm-manager) covering all core functionality, multi-host libvirt connections, race condition fixes, two-phase broken VM timeout, auto-exclude behavior, the `--on-broken` script hook (with retry/timeout/repair flow), CancelledError handling, stale tag scanning, and setMetadata API usage:
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
@@ -26,16 +26,16 @@ The project has **388 comprehensive unit tests** (214 shared/deployer + 174 vm-m
 | `tests/test_vm_operations.py` | 50 | Tag CRUD, IP resolution, state strings, setMetadata API, XML fallback (includes parametrized) |
 | `tests/test_metadata_manager.py` | 41 | MetadataManager get/set/claim/clear |
 | `tests/test_allocate_vms.py` | 43 | VM allocation, multi-host allocation, auto-exclude broken |
-| `tests/vm_manager/test_daemon.py` | 70 | Event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag, on-broken timeout/retries/delay init |
-| `tests/vm_manager/test_tag_cleaner.py` | 59 | Race conditions #3/#6/#7, broken tag, in_use check, on-broken script, retry logic, configurable timeout, return values, repair flow, CancelledError handling, stale tag removal |
+| `tests/vm_manager/test_tag_cleaner.py` | 91 | Two-phase timeout (Phase 1/2 success/timeout/recovery), `_wait_for_vm_ssh` helper, race conditions #3/#6/#7, broken tag, in_use check, on-broken script, retry logic, configurable timeout, return values, repair flow, CancelledError handling |
+| `tests/vm_manager/test_daemon.py` | 74 | Event filtering, stale tags, startup scan, stale scan loop, auto-exclude broken_tag, broken_timeout/on_broken_delay init and defaults |
 | `tests/vm_manager/test_ssh_checker.py` | 23 | Uptime verification, string return values |
 | `tests/vm_manager/test_event_monitor.py` | 15 | Reboot callback registration |
 | `tests/vm_manager/test_vm_tracker.py` | 7 | Session management, debouncing |
-| **Total** | **388** | All race conditions, multi-host connections, broken VM handling, auto-exclude, on-broken (retry/timeout/repair), CancelledError, stale scan, setMetadata API |
+| **Total** | **424** | All race conditions, multi-host connections, two-phase broken VM timeout, auto-exclude, on-broken (retry/timeout/repair), CancelledError, stale scan, setMetadata API |
 
 ### Test Types
 
-1. **Unit Tests** (388 tests)
+1. **Unit Tests** (424 tests)
    - Mocked dependencies (libvirt, paramiko)
    - Fast execution (<1 minute)
    - Run automatically in CI/CD
@@ -234,9 +234,9 @@ def test_ssh_connect_no_auth_method(self):
 
 ---
 
-### test_tag_cleaner.py (59 tests)
+### test_tag_cleaner.py (91 tests)
 
-Tests workflow orchestration, IP retry logic, broken VM tagging, in_use checks, and on-broken script hook.
+Tests two-phase broken VM timeout, `_wait_for_vm_ssh` helper, workflow orchestration, IP retry logic, broken VM tagging, in_use checks, on-broken script hook, repair flow, and CancelledError handling. Organized into 8 test classes: `TestTagCleaner` (basic orchestration), `TestWaitForVmSSH` (helper method), `TestTwoPhaseTimeout` (phase 1/2 scenarios), `TestTagCleanerRaceConditions` (production race conditions), `TestOnBrokenScript` (script execution), `TestOnBrokenReturnValues`, `TestRepairFlow`, and `TestCancelledErrorHandling`.
 
 #### Test: get_vm_ip_with_retry_success_first_try
 ```python
