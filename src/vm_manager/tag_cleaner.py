@@ -296,6 +296,10 @@ class TagCleaner:
                     f"VM {vm_name} SSH succeeded (Phase 1), "
                     "checking in-use status"
                 )
+                # Remove broken tag if present (e.g., re-monitoring after
+                # a repair script where the broken tag was intentionally
+                # kept until SSH proved the VM is healthy).
+                await self._remove_broken_tag(vm_name, vm_uuid)
                 # Wait a few seconds to ensure ansible-deployer has fully
                 # exited (ansible-deployer's reset_vm() is non-blocking —
                 # it initiates reboot and immediately calls mark_available(),
@@ -448,11 +452,15 @@ class TagCleaner:
         """
         Handle post-repair actions after an on-broken script succeeds.
 
-        Removes the broken tag so the VM can be monitored again, then
-        triggers a fresh monitoring session. The on-broken script typically
-        restarts the VM (e.g., reset-vm-disks.sh), so by this point the VM
-        is running with fresh disks. Re-monitoring will wait for SSH and
-        then remove the 'used' tag.
+        Triggers a fresh monitoring session while keeping the broken tag.
+        The broken tag is only removed when SSH actually succeeds during
+        re-monitoring — a successful script exit code alone does not prove
+        the VM is healthy.
+
+        The on-broken script typically restarts the VM (e.g.,
+        reset-vm-disks.sh), so by this point the VM is running with fresh
+        disks. Re-monitoring will wait for SSH and then remove the broken
+        and used tags.
 
         If re-monitoring cannot be triggered (e.g., VM no longer exists),
         the stale tag scan will eventually clean up.
@@ -461,14 +469,14 @@ class TagCleaner:
             vm_name: VM name
             vm_uuid: VM UUID
         """
-        await self._remove_broken_tag(vm_name, vm_uuid)
         try:
             loop = asyncio.get_running_loop()
             domain = await loop.run_in_executor(
                 None, self.conn.lookupByName, vm_name
             )
             logger.info(
-                f"Triggering re-monitoring for repaired VM {vm_name}"
+                f"Triggering re-monitoring for VM {vm_name} "
+                "(broken tag kept until SSH succeeds)"
             )
             await self.handle_vm_started(domain)
         except Exception as e:
@@ -483,14 +491,15 @@ class TagCleaner:
         vm_uuid: str
     ) -> None:
         """
-        Remove the broken tag from a VM after successful repair.
+        Remove the broken tag from a VM after SSH recovery.
 
-        Called after the on-broken script succeeds so the VM can be
-        re-monitored and eventually have its 'used' tag removed.
+        Called when SSH succeeds (Phase 1 or Phase 2), proving the VM
+        is actually healthy. This is a no-op if no broken_tag is
+        configured or the tag is not present.
 
         Args:
             vm_name: VM name
-            vm_uuid: VM UUID
+            vm_uuid: VM UUID (for logging)
         """
         if not self.broken_tag:
             return
@@ -500,7 +509,7 @@ class TagCleaner:
         try:
             logger.info(
                 f"Removing broken tag '{self.broken_tag}' from VM "
-                f"{vm_name} (uuid={vm_uuid}) after successful repair"
+                f"{vm_name} (uuid={vm_uuid})"
             )
 
             def do_remove_broken_tag():

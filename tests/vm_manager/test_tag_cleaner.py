@@ -844,7 +844,7 @@ class TestTwoPhaseTimeout:
     async def test_phase1_success_removes_used_tag(
         self, mock_conn, ssh_checker, vm_tracker, mock_domain
     ):
-        """SSH succeeds in Phase 1 → used tag removed, no broken tag."""
+        """SSH succeeds in Phase 1 → used tag removed, no broken tag added."""
         mock_conn.lookupByName.return_value = mock_domain
         cleaner = TagCleaner(
             conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
@@ -863,9 +863,11 @@ class TestTwoPhaseTimeout:
 
             # Phase 1 called with broken_timeout
             mock_wait.assert_called_once_with("test-vm", 300)
+            # Broken tag removal attempted (no-op if not present)
+            mock_remove.assert_any_call(mock_conn, mock_domain, "broken")
             # Used tag removed
-            mock_remove.assert_called_once_with(mock_conn, mock_domain, "used")
-            # No broken tag
+            mock_remove.assert_any_call(mock_conn, mock_domain, "used")
+            # No broken tag added
             mock_add.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1577,12 +1579,14 @@ class TestTagCleanerRaceConditions:
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_mid_playbook_reboot_does_not_remove_tags(
+    async def test_mid_playbook_reboot_does_not_remove_used_tags(
         self, broken_cleaner, mock_domain, mock_conn
     ):
         """
         A playbook reboots the VM mid-run. SSH comes back up, but
-        the deployer is still orchestrating. Tags must NOT be removed.
+        the deployer is still orchestrating. The used/deploying tags
+        must NOT be removed. The broken tag IS removed because SSH
+        proved the VM is healthy.
         """
         mock_conn.lookupByName.return_value = mock_domain
 
@@ -1596,7 +1600,15 @@ class TestTagCleanerRaceConditions:
 
             await broken_cleaner._monitor_vm("test-uuid-123", "test-vm")
 
-            mock_remove.assert_not_called()
+            # Broken tag removed (SSH success = not broken)
+            mock_remove.assert_called_once_with(
+                mock_conn, mock_domain, "broken"
+            )
+            # used/deploying tags NOT removed (deployer still active)
+            removed_tags = [c[0][2] for c in mock_remove.call_args_list]
+            assert "used" not in removed_tags
+            assert "deploying" not in removed_tags
+            # No broken tag added
             mock_add.assert_not_called()
 
     # ------------------------------------------------------------------ #
@@ -2296,10 +2308,10 @@ class TestRepairFlow:
         )
 
     @pytest.mark.asyncio
-    async def test_broken_tag_removed_after_successful_repair(
+    async def test_remove_broken_tag_calls_remove_vm_tag(
         self, mock_conn, ssh_checker, vm_tracker, mock_domain
     ):
-        """After on-broken script succeeds, the broken tag is removed."""
+        """_remove_broken_tag removes the broken tag via remove_vm_tag."""
         mock_conn.lookupByName.return_value = mock_domain
         cleaner = TagCleaner(
             conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
@@ -2331,20 +2343,24 @@ class TestRepairFlow:
     async def test_handle_successful_repair_triggers_monitoring(
         self, mock_conn, ssh_checker, vm_tracker, mock_domain
     ):
-        """After repair, handle_vm_started is called to start fresh monitoring."""
+        """After repair, handle_vm_started is called to start fresh
+        monitoring. The broken tag is NOT removed — only SSH success
+        should remove it."""
         mock_conn.lookupByName.return_value = mock_domain
         cleaner = TagCleaner(
             conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
             tags_to_remove=["used"], broken_tag="broken",
         )
 
-        with patch('vm_manager.tag_cleaner.remove_vm_tag'), \
+        with patch('vm_manager.tag_cleaner.remove_vm_tag') as mock_remove, \
              patch.object(cleaner, 'handle_vm_started',
                          new_callable=AsyncMock) as mock_handle:
 
             await cleaner._handle_successful_repair("test-vm", "test-uuid-123")
 
             mock_handle.assert_awaited_once_with(mock_domain)
+            # Broken tag NOT removed — only SSH success should do that
+            mock_remove.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_repair_when_script_fails(
