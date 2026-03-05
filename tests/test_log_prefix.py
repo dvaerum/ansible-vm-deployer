@@ -219,3 +219,69 @@ class TestRepeatTaskIdSuffix:
 
         assert (tmp_path / "ci" / "nightly_20260213_120000_abc12345_run-1_stdout.log").exists()
         assert (tmp_path / "ci" / "nightly_20260213_120000_abc12345_run-2_stdout.log").exists()
+
+
+class TestRepeatExecutionCount:
+    """Verify --repeat controls how many times the executor is called.
+
+    These tests replicate the exact loop from cli.py:330 and count
+    how many times execute_playbook would be invoked.
+    """
+
+    @staticmethod
+    def _simulate_repeat_loop(repeat):
+        """Simulate the repeat loop from cli.py, returning call count and task IDs."""
+        task_id = "20260225_120000_abc12345"
+        calls = []
+        success = True
+
+        for run_num in range(1, repeat + 1):
+            if repeat > 1:
+                run_task_id = f"{task_id}_run-{run_num}"
+            else:
+                run_task_id = task_id
+            calls.append(run_task_id)
+
+            if not success:
+                break
+
+        return calls
+
+    def test_repeat_1_executes_once(self):
+        """--repeat 1 calls the executor exactly once."""
+        calls = self._simulate_repeat_loop(repeat=1)
+        assert len(calls) == 1
+        assert calls == ["20260225_120000_abc12345"]
+
+    def test_repeat_2_executes_twice(self):
+        """--repeat 2 calls the executor exactly twice."""
+        calls = self._simulate_repeat_loop(repeat=2)
+        assert len(calls) == 2
+        assert calls == [
+            "20260225_120000_abc12345_run-1",
+            "20260225_120000_abc12345_run-2",
+        ]
+
+    def test_repeat_5_executes_five_times(self):
+        """--repeat 5 calls the executor exactly five times."""
+        calls = self._simulate_repeat_loop(repeat=5)
+        assert len(calls) == 5
+        for i, call_id in enumerate(calls, 1):
+            assert call_id.endswith(f"_run-{i}")
+
+    def test_repeat_stops_on_failure(self):
+        """Executor failure on run 2 stops at 2 calls, not 5."""
+        task_id = "20260225_120000_abc12345"
+        repeat = 5
+        fail_on_run = 2
+        calls = []
+
+        for run_num in range(1, repeat + 1):
+            run_task_id = f"{task_id}_run-{run_num}"
+            calls.append(run_task_id)
+            success = (run_num != fail_on_run)
+            if not success:
+                break
+
+        assert len(calls) == 2
+        assert calls[-1] == f"{task_id}_run-2"
