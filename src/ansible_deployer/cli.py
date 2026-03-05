@@ -20,6 +20,7 @@ from .vm_manager import VMManager, VMNotFoundException, NoAvailableVMException
 from .ansible_executor import AnsibleExecutor, AnsibleExecutionError
 from .metadata_manager import MetadataManager
 from .vm_reset import VMResetManager, VMResetError
+from . import signal_handler
 
 
 console = Console()
@@ -232,6 +233,11 @@ def deploy(
     console.print(f"Playbook: {playbook}")
     console.print(f"Log directory: {log_directory}")
     
+    # Install SIGTERM handler so that finally blocks run on termination
+    # (e.g., when Jenkins stops a build). Without this, SIGTERM kills
+    # the process immediately and VMs stay marked as in-use.
+    signal_handler.install_signal_handlers()
+
     vm_manager = VMManager(connections=cfg.get_connections())
     executor = AnsibleExecutor(log_directory)
     reset_manager = VMResetManager()
@@ -391,6 +397,19 @@ def deploy(
         logging.exception("Deployment error")
         sys.exit(1)
     finally:
+        # Ignore further signals so cleanup cannot be interrupted.
+        # A second SIGTERM (e.g., Jenkins sends SIGTERM, waits, sends
+        # another before SIGKILL) would raise SystemExit again and
+        # abort the VM reset mid-way, leaving VMs in a dirty state.
+        signal_handler.block_further_signals()
+
+        # Ensure any running ansible-playbook subprocess is terminated
+        # before we proceed to VM cleanup. This is a safety net — the
+        # executor's own finally block should have handled this, but
+        # if a signal arrived at just the wrong moment, this catches it.
+        signal_handler.terminate_active_subprocess()
+        signal_handler.deregister_subprocess()
+
         # Always reset VMs and mark as available (unless --no-reset).
         # The original connection is closed at this point, so we open a
         # single fresh connection and re-lookup domains by name to get

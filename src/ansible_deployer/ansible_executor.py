@@ -13,6 +13,8 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 import shutil
 
+from . import signal_handler
+
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +184,7 @@ class AnsibleExecutor:
         }
 
         stdout_log_file = None
+        process = None
         try:
             # Open stdout log file for real-time writing
             # Since we're not using JSON callback, output is human-readable by default
@@ -209,6 +212,7 @@ class AnsibleExecutor:
                 env=process_env,
                 cwd=working_dir,
             )
+            signal_handler.register_subprocess(process)
 
             # Capture output line by line and write to stdout log in REAL-TIME
             if process.stdout:
@@ -224,6 +228,7 @@ class AnsibleExecutor:
                     stdout_log_file.flush()  # Ensure it's written immediately
 
             return_code = process.wait()
+            signal_handler.deregister_subprocess()
             
             # Add completion info
             stdout_log_file.write(f"\n{'=' * 80}\n")
@@ -267,6 +272,18 @@ class AnsibleExecutor:
             raise AnsibleExecutionError(f"Failed to execute playbook: {e}") from e
         
         finally:
+            # Ensure child process is terminated and reaped to avoid
+            # orphans. This runs on normal exit, exceptions, and
+            # signal-triggered SystemExit/KeyboardInterrupt.
+            signal_handler.terminate_active_subprocess()
+            signal_handler.deregister_subprocess()
+            if process is not None and process.poll() is None:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
             # Always close the stdout log file
             if stdout_log_file and not stdout_log_file.closed:
                 try:
