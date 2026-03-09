@@ -787,7 +787,9 @@ class TestCheckExistingVMs:
         domain = _make_domain("non-matching")
         d.conn.listAllDomains.return_value = [domain]
 
-        with patch.object(d, "_should_monitor_vm", return_value=False), \
+        with patch("vm_manager.daemon.get_vm_tags",
+                   return_value=["linux-test"]), \
+             patch.object(d, "_should_monitor_vm", return_value=False), \
              patch.object(d, "_is_broken_and_recoverable",
                           return_value=False):
             await d._check_existing_vms()
@@ -807,6 +809,22 @@ class TestCheckExistingVMs:
             await d._check_existing_vms()
 
         d.tag_cleaner.handle_vm_started.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_already_monitored_vms(self):
+        """VMs already being monitored should be skipped."""
+        d = self._setup()
+        d.vm_tracker.is_monitoring = AsyncMock(return_value=True)
+
+        domain = _make_domain("monitored-vm", "uuid-monitored")
+        d.conn.listAllDomains.return_value = [domain]
+
+        await d._check_existing_vms()
+
+        d.tag_cleaner.handle_vm_started.assert_not_called()
+        d.vm_tracker.is_monitoring.assert_awaited_once_with(
+            "uuid-monitored"
+        )
 
     @pytest.mark.asyncio
     async def test_mixed_vms_correct_routing(self):
@@ -904,7 +922,9 @@ class TestCheckExistingVMs:
         domain = _make_domain("unrelated-vm", "uuid-unrel")
         d.conn.listAllDomains.return_value = [domain]
 
-        with patch.object(d, "_should_monitor_vm", return_value=False), \
+        with patch("vm_manager.daemon.get_vm_tags",
+                   return_value=["linux-test"]), \
+             patch.object(d, "_should_monitor_vm", return_value=False), \
              patch.object(d, "_is_broken_and_recoverable",
                           return_value=False):
             await d._check_existing_vms()
@@ -1259,7 +1279,9 @@ class TestRunStaleScan:
         domain = _make_domain("unrelated-vm", "uuid-unrel")
         d.conn.listAllDomains.return_value = [domain]
 
-        with patch.object(d, "_should_monitor_vm", return_value=False), \
+        with patch("vm_manager.daemon.get_vm_tags",
+                   return_value=["linux-test"]), \
+             patch.object(d, "_should_monitor_vm", return_value=False), \
              patch.object(d, "_is_broken_and_recoverable",
                           return_value=False):
             await d._run_stale_tag_scan()
@@ -1275,9 +1297,7 @@ class TestRunStaleScan:
         domain = _make_domain("monitored-vm", "uuid-monitored")
         d.conn.listAllDomains.return_value = [domain]
 
-        with patch.object(d, "_should_monitor_vm", return_value=True), \
-             patch.object(d, "_is_vm_stale", return_value=True):
-            await d._run_stale_tag_scan()
+        await d._run_stale_tag_scan()
 
         d.tag_cleaner.handle_vm_started.assert_not_called()
         d.vm_tracker.is_monitoring.assert_awaited_once_with("uuid-monitored")
@@ -1290,7 +1310,9 @@ class TestRunStaleScan:
         domain = _make_domain("active-vm", "uuid-active")
         d.conn.listAllDomains.return_value = [domain]
 
-        with patch.object(d, "_should_monitor_vm", return_value=True), \
+        with patch("vm_manager.daemon.get_vm_tags",
+                   return_value=["linux-test", "used"]), \
+             patch.object(d, "_should_monitor_vm", return_value=True), \
              patch.object(d, "_is_vm_stale", return_value=False):
             await d._run_stale_tag_scan()
 
@@ -1710,3 +1732,147 @@ class TestHandleVMStartedCallOrdering:
     async def _call(daemon, domain):
         daemon._handle_vm_started(domain)
         await asyncio.sleep(0)
+
+
+# ===================================================================
+# _continuous_boot_loop
+# ===================================================================
+
+class TestContinuousBootLoop:
+    """Tests for the continuous boot loop (--boot-always mode)."""
+
+    @pytest.mark.asyncio
+    async def test_boots_vms_after_interval(self):
+        """Loop boots matching VMs and sleeps for check_interval."""
+        d = _make_daemon(check_interval=42)
+        d._running = True
+        d.conn = Mock()
+
+        domain = _make_domain("vm-a")
+        d.conn.listAllDomains.return_value = [domain]
+
+        sleep_args = []
+        original_sleep = asyncio.sleep
+
+        async def mock_sleep(seconds):
+            sleep_args.append(seconds)
+            d._running = False  # Stop after first iteration
+            await original_sleep(0.001)
+
+        with patch.object(d, "_should_monitor_vm", return_value=True), \
+             patch("asyncio.sleep", side_effect=mock_sleep):
+            await d._continuous_boot_loop()
+
+        domain.create.assert_called_once()
+        assert 42 in sleep_args
+
+    @pytest.mark.asyncio
+    async def test_survives_exception(self):
+        """A RuntimeError from listAllDomains doesn't kill the loop."""
+        d = _make_daemon(check_interval=10)
+        d._running = True
+        d.conn = Mock()
+
+        call_count = 0
+        original_sleep = asyncio.sleep
+
+        def list_domains_side_effect(flag):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("connection lost")
+            return []
+
+        d.conn.listAllDomains.side_effect = list_domains_side_effect
+
+        async def mock_sleep(seconds):
+            if call_count >= 2:
+                d._running = False
+            await original_sleep(0.001)
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            await d._continuous_boot_loop()
+
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_stops_on_cancellation(self):
+        """CancelledError breaks the loop cleanly."""
+        d = _make_daemon(check_interval=10)
+        d._running = True
+        d.conn = Mock()
+        d.conn.listAllDomains.return_value = []
+
+        async def mock_sleep(seconds):
+            raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            # CancelledError should be handled internally
+            await d._continuous_boot_loop()
+
+
+# ===================================================================
+# start()
+# ===================================================================
+
+class TestStart:
+    """Tests for the daemon start() method."""
+
+    @pytest.mark.asyncio
+    async def test_start_connects_and_initializes(self):
+        """start() calls libvirt.virEventRegisterDefaultImpl,
+        connects via LibvirtConnection, and initializes tag_cleaner
+        and event_monitor."""
+        d = _make_daemon()
+
+        mock_conn = Mock()
+        mock_libvirt_conn = Mock()
+        mock_libvirt_conn.get_connection.return_value = mock_conn
+
+        mock_event_monitor = Mock()
+        mock_event_monitor.start = AsyncMock()
+
+        with patch("vm_manager.daemon.libvirt") as mock_libvirt, \
+             patch(
+                 "vm_manager.daemon.LibvirtConnection",
+                 return_value=mock_libvirt_conn,
+             ), \
+             patch(
+                 "vm_manager.daemon.EventMonitor",
+                 return_value=mock_event_monitor,
+             ), \
+             patch("vm_manager.daemon.TagCleaner"):
+            await d.start()
+
+        mock_libvirt.virEventRegisterDefaultImpl.assert_called_once()
+        mock_libvirt_conn.connect.assert_called_once()
+        assert d.conn is mock_conn
+        assert d.tag_cleaner is not None
+        assert d.event_monitor is mock_event_monitor
+        mock_event_monitor.start.assert_awaited_once()
+        assert d._running is True
+
+    @pytest.mark.asyncio
+    async def test_start_calls_stop_on_failure(self):
+        """If start() fails partway through, stop() is called."""
+        d = _make_daemon()
+
+        mock_conn = Mock()
+        mock_libvirt_conn = Mock()
+        mock_libvirt_conn.get_connection.return_value = mock_conn
+
+        with patch("vm_manager.daemon.libvirt") as mock_libvirt, \
+             patch(
+                 "vm_manager.daemon.LibvirtConnection",
+                 return_value=mock_libvirt_conn,
+             ), \
+             patch(
+                 "vm_manager.daemon.EventMonitor",
+                 side_effect=RuntimeError("event monitor init failed"),
+             ), \
+             patch("vm_manager.daemon.TagCleaner"), \
+             patch.object(d, "stop", new_callable=AsyncMock) as mock_stop:
+            with pytest.raises(RuntimeError, match="event monitor"):
+                await d.start()
+
+        mock_stop.assert_awaited_once()

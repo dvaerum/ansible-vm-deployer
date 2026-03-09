@@ -363,3 +363,26 @@ class TestEventMonitorRebootCallback:
             # Callback ID set should be cleared
             assert len(monitor._callback_ids) == 0
             assert monitor._running is False
+
+    @pytest.mark.asyncio
+    async def test_start_creates_event_loop_task(self, mock_conn, on_vm_started):
+        """Test that start() creates _event_loop_task and stop() cancels it."""
+        with patch('libvirt.virEventRunDefaultImpl'):
+            monitor = EventMonitor(
+                conn=mock_conn,
+                on_vm_started=on_vm_started
+            )
+
+            # Before start, no task exists
+            assert monitor._event_loop_task is None
+
+            await monitor.start()
+
+            # After start, task should exist and not be done
+            assert monitor._event_loop_task is not None
+            assert not monitor._event_loop_task.done()
+
+            await monitor.stop()
+
+            # After stop, task should be done/cancelled
+            assert monitor._event_loop_task.done()

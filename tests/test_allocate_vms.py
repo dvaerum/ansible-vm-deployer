@@ -125,6 +125,10 @@ class TestAllocateVms:
 
         mgr = _build_manager([d_shutoff, d_paused, d_running, d_running2])
 
+        # A shared mock instance is correct here: non-running VMs are
+        # filtered by state before MetadataManager is ever constructed
+        # (vm_manager.py:415-417), so only the two running VMs reach
+        # the is_in_use / try_claim calls.
         with patch("ansible_deployer.vm_manager.MetadataManager") as MockMM:
             instance = MockMM.return_value
             instance.is_in_use.return_value = False

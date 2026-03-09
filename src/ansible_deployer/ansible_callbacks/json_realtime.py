@@ -50,6 +50,7 @@ DOCUMENTATION = '''
       - Set JSON_LOG_PATH environment variable to specify JSON output location
 '''
 
+import copy
 import os
 import json
 import datetime
@@ -165,7 +166,7 @@ class CallbackModule(DefaultCallbackModule):
         task_result = {}
         for key, value in result._result.items():
             if not key.startswith('_ansible'):
-                task_result[key] = value
+                task_result[key] = copy.deepcopy(value)
 
         # Ensure standard status fields are always present
         task_result['changed'] = result._result.get('changed', False)

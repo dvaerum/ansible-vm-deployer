@@ -1231,6 +1231,47 @@ class TestTwoPhaseTimeout:
             # No tag removal
             mock_remove.assert_not_called()
 
+    # -- is_recovery=True tests -----------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_phase1_timeout_recovery_skips_mark_broken(
+        self, mock_conn, ssh_checker, vm_tracker, mock_domain
+    ):
+        """When is_recovery=True and Phase 1 times out, _mark_vm_broken
+        is NOT called (broken tag already present). Phase 2 still runs."""
+        mock_conn.lookupByName.return_value = mock_domain
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker,
+            vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+            on_broken="/script", on_broken_delay=0,
+        )
+
+        with patch.object(
+            cleaner, '_wait_for_vm_ssh', new_callable=AsyncMock
+        ) as mock_wait, \
+             patch(
+                 'vm_manager.tag_cleaner.add_vm_tag'
+             ) as mock_add, \
+             patch.object(
+                 cleaner, '_run_on_broken_script',
+                 new_callable=AsyncMock, return_value=False
+             ) as mock_script:
+
+            mock_wait.side_effect = [
+                ("10.0.0.5", "timeout"),  # Phase 1
+                ("10.0.0.5", "timeout"),  # Phase 2
+            ]
+
+            await cleaner._monitor_vm(
+                "test-uuid-123", "test-vm", is_recovery=True
+            )
+
+            # Broken tag must NOT be re-added (already present)
+            mock_add.assert_not_called()
+            # Phase 2 still proceeds — on-broken script runs
+            mock_script.assert_called_once()
+
     # -- Edge cases ------------------------------------------------------
 
     @pytest.mark.asyncio
@@ -1488,7 +1529,9 @@ class TestTwoPhaseTimeout:
 
         with patch.object(cleaner, '_wait_for_vm_ssh',
                          side_effect=mock_wait), \
-             patch('vm_manager.tag_cleaner.add_vm_tag'):
+             patch('vm_manager.tag_cleaner.add_vm_tag'), \
+             patch.object(vm_tracker, 'stop_monitoring',
+                         new_callable=AsyncMock) as mock_stop:
 
             task = asyncio.create_task(
                 cleaner._monitor_vm("test-uuid-123", "test-vm")
@@ -1498,6 +1541,9 @@ class TestTwoPhaseTimeout:
 
             with pytest.raises(asyncio.CancelledError):
                 await task
+
+            # stop_monitoring must be called in the finally block
+            mock_stop.assert_awaited_once_with("test-uuid-123")
 
     # -- Constructor stores new params -----------------------------------
 
@@ -1661,7 +1707,11 @@ class TestTagCleanerRaceConditions:
         with patch.object(broken_cleaner, '_wait_for_vm_ssh',
                          new_callable=AsyncMock) as mock_wait, \
              patch('vm_manager.tag_cleaner.remove_vm_tag') as mock_remove, \
-             patch('vm_manager.tag_cleaner.add_vm_tag') as mock_add:
+             patch('vm_manager.tag_cleaner.add_vm_tag') as mock_add, \
+             patch.object(
+                 broken_cleaner, '_is_vm_in_use', return_value=True
+             ), \
+             patch('asyncio.sleep', new_callable=AsyncMock):
 
             # Phase 1 timeout, Phase 2 indefinite → return success to end
             mock_wait.side_effect = [
@@ -1673,6 +1723,11 @@ class TestTagCleanerRaceConditions:
 
             # 'broken' tag added after Phase 1
             mock_add.assert_called_once_with(mock_conn, mock_domain, "broken")
+            # 'used'/'deploying' tags NOT removed (VM still in use)
+            assert not any(
+                c[0][2] in ("used", "deploying")
+                for c in mock_remove.call_args_list
+            )
 
     # ------------------------------------------------------------------ #
     # Scenario: Rapid consecutive reboots (debounce + race)
@@ -2127,18 +2182,22 @@ class TestOnBrokenScript:
         mock_conn.lookupByName.return_value = Mock()
 
         with patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
-             patch('asyncio.create_subprocess_exec', new_callable=AsyncMock) as mock_exec:
+             patch('asyncio.create_subprocess_exec',
+                   new_callable=AsyncMock) as mock_exec:
 
+            # mock_proc.returncode must be set to 0 so the production
+            # code sees a successful exit after communicate() returns.
             mock_proc = AsyncMock()
             mock_proc.communicate.return_value = (b"", b"")
             mock_proc.returncode = 0
             mock_exec.return_value = mock_proc
 
-            # Patch asyncio.wait_for to verify the timeout value
-            with patch('asyncio.wait_for', new_callable=AsyncMock) as mock_wait_for:
+            with patch(
+                'asyncio.wait_for', new_callable=AsyncMock
+            ) as mock_wait_for:
                 mock_wait_for.return_value = (b"", b"")
 
-                await cleaner._run_on_broken_script(
+                result = await cleaner._run_on_broken_script(
                     "test-vm", "test-uuid-123", "10.0.0.5"
                 )
 
@@ -2146,6 +2205,8 @@ class TestOnBrokenScript:
                 mock_wait_for.assert_called_once()
                 _, kwargs = mock_wait_for.call_args
                 assert kwargs["timeout"] == 600
+                # returncode=0 on mock_proc → script succeeded
+                assert result is True
 
     @pytest.mark.asyncio
     async def test_script_zero_retries_runs_once(
@@ -2533,7 +2594,9 @@ class TestRepairFlow:
              patch('asyncio.create_subprocess_exec',
                    new_callable=AsyncMock) as mock_exec, \
              patch.object(vm_tracker, 'stop_monitoring',
-                         new_callable=AsyncMock) as mock_stop:
+                         new_callable=AsyncMock) as mock_stop, \
+             patch.object(cleaner, 'handle_vm_started',
+                         new_callable=AsyncMock) as mock_handle:
 
             mock_wait.side_effect = [
                 ("10.0.0.5", "timeout"),  # Phase 1
@@ -2550,6 +2613,8 @@ class TestRepairFlow:
             # stop_monitoring called exactly once (by _handle_successful_repair),
             # NOT again by the finally block (tracking_stopped=True)
             mock_stop.assert_called_once_with("test-uuid-123")
+            # handle_vm_started called for re-monitoring after repair
+            mock_handle.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_handle_successful_repair_lookupByName_failure(

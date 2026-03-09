@@ -183,13 +183,23 @@ class TestSSHChecker:
         """Test SSH connection using password instead of key."""
         config = SSHConfig(username="root", password="secret")
         checker = SSHChecker(config)
-        
+
         with patch('paramiko.SSHClient') as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
-            
-            result = checker._ssh_connect_sync("192.168.1.100", "test-vm", 1)
-            
+
+            # Mock exec_command to return valid uptime data
+            mock_stdout = MagicMock()
+            mock_stdout.read.return_value = b"10.5 123.4"
+            mock_client.exec_command.return_value = (
+                MagicMock(), mock_stdout, MagicMock()
+            )
+
+            result = checker._ssh_connect_sync(
+                "192.168.1.100", "test-vm", 1
+            )
+
+            assert result == "success"
             # Verify password was passed to connect
             call_args = mock_client.connect.call_args
             assert call_args[1]['password'] == "secret"
@@ -199,13 +209,23 @@ class TestSSHChecker:
         """Test SSH connection using key file."""
         config = SSHConfig(username="root", key_path="/test/key")
         checker = SSHChecker(config)
-        
+
         with patch('paramiko.SSHClient') as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
-            
-            result = checker._ssh_connect_sync("192.168.1.100", "test-vm", 1)
-            
+
+            # Mock exec_command to return valid uptime data
+            mock_stdout = MagicMock()
+            mock_stdout.read.return_value = b"10.5 123.4"
+            mock_client.exec_command.return_value = (
+                MagicMock(), mock_stdout, MagicMock()
+            )
+
+            result = checker._ssh_connect_sync(
+                "192.168.1.100", "test-vm", 1
+            )
+
+            assert result == "success"
             # Verify key_filename was passed to connect
             call_args = mock_client.connect.call_args
             assert call_args[1]['key_filename'] == "/test/key"

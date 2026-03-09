@@ -26,6 +26,13 @@ from . import signal_handler
 console = Console()
 
 
+def build_run_task_id(task_id: str, run_num: int, repeat: int) -> str:
+    """Build a run-specific task_id with _run-N suffix when repeat > 1."""
+    if repeat > 1:
+        return f"{task_id}_run-{run_num}"
+    return task_id
+
+
 def sanitize_log_prefix(prefix: str) -> str:
     """Sanitize a log prefix string for use in file paths.
 
@@ -334,12 +341,11 @@ def deploy(
                 console.print(f"Wrapper script: {wrapper_script_path}")
             
             for run_num in range(1, repeat + 1):
-                # Build run-specific task_id: add _runN suffix when repeat > 1
+                # Build run-specific task_id: add _run-N suffix when repeat > 1
+                run_task_id = build_run_task_id(task_id, run_num, repeat)
                 if repeat > 1:
-                    run_task_id = f"{task_id}_run-{run_num}"
                     console.print(f"[yellow]Executing playbook (run {run_num}/{repeat})...[/yellow]")
                 else:
-                    run_task_id = task_id
                     console.print("[yellow]Executing playbook...[/yellow]")
                 
                 # Show log file location so user can monitor progress in real-time

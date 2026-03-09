@@ -9,7 +9,7 @@ Covers:
 import pytest
 from pathlib import Path
 
-from ansible_deployer.cli import sanitize_log_prefix
+from ansible_deployer.cli import sanitize_log_prefix, build_run_task_id
 
 
 class TestSanitizeLogPrefix:
@@ -68,7 +68,15 @@ class TestSanitizeLogPrefix:
 
 
 class TestExecutorSubdirectoryCreation:
-    """Test that AnsibleExecutor creates parent directories for log files."""
+    """Test that AnsibleExecutor creates parent directories for log files.
+
+    These tests replicate the path-construction and mkdir logic from
+    execute_playbook (ansible_executor.py:80-82) rather than calling
+    execute_playbook directly, because execute_playbook requires a real
+    playbook file and spawns a subprocess.  The tested logic is the
+    Path construction and parent-directory creation that execute_playbook
+    performs before launching the subprocess.
+    """
 
     def test_creates_subdirectory_for_task_id_with_slash(self, tmp_path):
         """Log subdirectories are created when task_id contains path separators."""
@@ -80,12 +88,12 @@ class TestExecutorSubdirectoryCreation:
         task_id = "test/linux_20260212_120000_abc12345"
 
         # Simulate what execute_playbook does: build log paths and create parents
-        stdout_log = executor.log_dir / f"{task_id}_stdout.log"
-        json_log = executor.log_dir / f"{task_id}.json"
+        stdout_log = executor.log_dir.joinpath(f"{task_id}_stdout.log")
+        json_log = executor.log_dir.joinpath(f"{task_id}.json")
         stdout_log.parent.mkdir(parents=True, exist_ok=True)
 
         # The subdirectory should now exist
-        expected_subdir = tmp_path / "test"
+        expected_subdir = tmp_path.joinpath("test")
         assert expected_subdir.is_dir()
 
         # Writing to the log files should succeed
@@ -101,10 +109,10 @@ class TestExecutorSubdirectoryCreation:
         executor = AnsibleExecutor(log_dir=tmp_path)
 
         task_id = "ci/nightly/linux-9_20260212_120000_abc12345"
-        stdout_log = executor.log_dir / f"{task_id}_stdout.log"
+        stdout_log = executor.log_dir.joinpath(f"{task_id}_stdout.log")
         stdout_log.parent.mkdir(parents=True, exist_ok=True)
 
-        expected_subdir = tmp_path / "ci" / "nightly"
+        expected_subdir = tmp_path.joinpath("ci").joinpath("nightly")
         assert expected_subdir.is_dir()
         stdout_log.write_text("test")
         assert stdout_log.exists()
@@ -116,7 +124,7 @@ class TestExecutorSubdirectoryCreation:
         executor = AnsibleExecutor(log_dir=tmp_path)
 
         task_id = "prod-deploy_20260212_120000_abc12345"
-        stdout_log = executor.log_dir / f"{task_id}_stdout.log"
+        stdout_log = executor.log_dir.joinpath(f"{task_id}_stdout.log")
         stdout_log.parent.mkdir(parents=True, exist_ok=True)
 
         # Parent is just tmp_path itself, no subdirs
@@ -136,25 +144,16 @@ class TestRepeatTaskIdSuffix:
     def test_single_run_no_suffix(self):
         """With repeat=1, task_id has no _runN suffix."""
         task_id = "20260213_120000_abc12345"
-        repeat = 1
-        for run_num in range(1, repeat + 1):
-            if repeat > 1:
-                run_task_id = f"{task_id}_run-{run_num}"
-            else:
-                run_task_id = task_id
-        assert run_task_id == "20260213_120000_abc12345"
+        result = build_run_task_id(task_id, run_num=1, repeat=1)
+        assert result == "20260213_120000_abc12345"
 
     def test_repeat_adds_run_suffix(self):
         """With repeat=3, each iteration gets _run-1, _run-2, _run-3."""
         task_id = "20260213_120000_abc12345"
-        repeat = 3
-        run_ids = []
-        for run_num in range(1, repeat + 1):
-            if repeat > 1:
-                run_task_id = f"{task_id}_run-{run_num}"
-            else:
-                run_task_id = task_id
-            run_ids.append(run_task_id)
+        run_ids = [
+            build_run_task_id(task_id, run_num, repeat=3)
+            for run_num in range(1, 4)
+        ]
         assert run_ids == [
             "20260213_120000_abc12345_run-1",
             "20260213_120000_abc12345_run-2",
@@ -166,14 +165,10 @@ class TestRepeatTaskIdSuffix:
         prefix = sanitize_log_prefix("test/linux")
         base = "20260213_120000_abc12345"
         task_id = f"{prefix}_{base}"
-        repeat = 2
-        run_ids = []
-        for run_num in range(1, repeat + 1):
-            if repeat > 1:
-                run_task_id = f"{task_id}_run-{run_num}"
-            else:
-                run_task_id = task_id
-            run_ids.append(run_task_id)
+        run_ids = [
+            build_run_task_id(task_id, run_num, repeat=2)
+            for run_num in range(1, 3)
+        ]
         assert run_ids == [
             "test/linux_20260213_120000_abc12345_run-1",
             "test/linux_20260213_120000_abc12345_run-2",
@@ -188,17 +183,20 @@ class TestRepeatTaskIdSuffix:
         repeat = 3
 
         for run_num in range(1, repeat + 1):
-            run_task_id = f"{task_id}_run-{run_num}"
-            stdout_log = executor.log_dir / f"{run_task_id}_stdout.log"
-            json_log = executor.log_dir / f"{run_task_id}.json"
+            run_task_id = build_run_task_id(task_id, run_num, repeat)
+            stdout_log = executor.log_dir.joinpath(
+                f"{run_task_id}_stdout.log"
+            )
+            json_log = executor.log_dir.joinpath(f"{run_task_id}.json")
             stdout_log.parent.mkdir(parents=True, exist_ok=True)
             stdout_log.write_text(f"output from run {run_num}")
             json_log.write_text(f'{{"run": {run_num}}}')
 
         # All 3 pairs of log files exist and have distinct content
         for run_num in range(1, 4):
-            stdout = tmp_path / f"{task_id}_run-{run_num}_stdout.log"
-            json_f = tmp_path / f"{task_id}_run-{run_num}.json"
+            run_id = build_run_task_id(task_id, run_num, repeat)
+            stdout = tmp_path.joinpath(f"{run_id}_stdout.log")
+            json_f = tmp_path.joinpath(f"{run_id}.json")
             assert stdout.exists()
             assert json_f.exists()
             assert f"run {run_num}" in stdout.read_text()
@@ -212,20 +210,28 @@ class TestRepeatTaskIdSuffix:
         repeat = 2
 
         for run_num in range(1, repeat + 1):
-            run_task_id = f"{task_id}_run-{run_num}"
-            stdout_log = executor.log_dir / f"{run_task_id}_stdout.log"
+            run_task_id = build_run_task_id(task_id, run_num, repeat)
+            stdout_log = executor.log_dir.joinpath(
+                f"{run_task_id}_stdout.log"
+            )
             stdout_log.parent.mkdir(parents=True, exist_ok=True)
             stdout_log.write_text(f"run {run_num}")
 
-        assert (tmp_path / "ci" / "nightly_20260213_120000_abc12345_run-1_stdout.log").exists()
-        assert (tmp_path / "ci" / "nightly_20260213_120000_abc12345_run-2_stdout.log").exists()
+        assert tmp_path.joinpath(
+            "ci",
+            "nightly_20260213_120000_abc12345_run-1_stdout.log"
+        ).exists()
+        assert tmp_path.joinpath(
+            "ci",
+            "nightly_20260213_120000_abc12345_run-2_stdout.log"
+        ).exists()
 
 
 class TestRepeatExecutionCount:
     """Verify --repeat controls how many times the executor is called.
 
-    These tests replicate the exact loop from cli.py:330 and count
-    how many times execute_playbook would be invoked.
+    Uses build_run_task_id() from cli.py to build task IDs, then
+    simulates the repeat loop to count executor invocations.
     """
 
     @staticmethod
@@ -236,10 +242,7 @@ class TestRepeatExecutionCount:
         success = True
 
         for run_num in range(1, repeat + 1):
-            if repeat > 1:
-                run_task_id = f"{task_id}_run-{run_num}"
-            else:
-                run_task_id = task_id
+            run_task_id = build_run_task_id(task_id, run_num, repeat)
             calls.append(run_task_id)
 
             if not success:
@@ -277,7 +280,7 @@ class TestRepeatExecutionCount:
         calls = []
 
         for run_num in range(1, repeat + 1):
-            run_task_id = f"{task_id}_run-{run_num}"
+            run_task_id = build_run_task_id(task_id, run_num, repeat)
             calls.append(run_task_id)
             success = (run_num != fail_on_run)
             if not success:

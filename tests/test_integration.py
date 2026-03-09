@@ -81,15 +81,17 @@ def test_ansible_executor_list_logs_with_files(tmp_path):
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     
-    # Create test log files
-    (log_dir / "20240101_120000_stdout.log").write_text("test stdout")
-    (log_dir / "20240101_120000_json.log").write_text("{}")
+    # Create test log files matching executor conventions:
+    # stdout log: {task_id}_stdout.log, json log: {task_id}.json
+    log_dir.joinpath("20240101_120000_stdout.log").write_text("test stdout")
+    log_dir.joinpath("20240101_120000.json").write_text("{}")
     
     executor = AnsibleExecutor(log_dir)
     logs = executor.list_logs()
     
     assert len(logs) == 1
     assert logs[0]["task_id"] == "20240101_120000"
+    assert logs[0]["json_log"] != ""  # json log should be found
 
 
 # Test MetadataManager (mocked)
@@ -97,31 +99,52 @@ def test_metadata_manager_mark_in_use():
     """Test marking VM as in use."""
     from ansible_deployer.metadata_manager import MetadataManager
     import libvirt
-    
+
     mock_domain = Mock()
-    mock_domain.metadata = Mock(side_effect=libvirt.libvirtError("Not found"))
+    mock_domain.metadata = Mock(
+        side_effect=libvirt.libvirtError("Not found")
+    )
     mock_domain.setMetadata = Mock()
-    
+
     mgr = MetadataManager(mock_domain)
     mgr.mark_in_use("test-task-123")
-    
-    # Verify setMetadata was called
-    assert mock_domain.setMetadata.called
+
+    # Verify setMetadata was called with the correct type constant
+    mock_domain.setMetadata.assert_called_once()
+    call_args = mock_domain.setMetadata.call_args
+    assert call_args[0][0] == libvirt.VIR_DOMAIN_METADATA_ELEMENT
+    # Verify the XML content contains expected elements
+    xml_content = call_args[0][1]
+    assert "in_use" in xml_content
+    assert ">true<" in xml_content
+    assert "task_id" in xml_content
+    assert ">test-task-123<" in xml_content
+    assert "started_at" in xml_content
 
 
 def test_metadata_manager_mark_available():
     """Test marking VM as available."""
     from ansible_deployer.metadata_manager import MetadataManager
     import libvirt
-    
+
     mock_domain = Mock()
-    mock_domain.metadata = Mock(side_effect=libvirt.libvirtError("Not found"))
+    mock_domain.metadata = Mock(
+        side_effect=libvirt.libvirtError("Not found")
+    )
     mock_domain.setMetadata = Mock()
-    
+
     mgr = MetadataManager(mock_domain)
     mgr.mark_available()
-    
-    assert mock_domain.setMetadata.called
+
+    # Verify setMetadata was called with the correct type constant
+    mock_domain.setMetadata.assert_called_once()
+    call_args = mock_domain.setMetadata.call_args
+    assert call_args[0][0] == libvirt.VIR_DOMAIN_METADATA_ELEMENT
+    # Verify the XML content contains expected elements
+    xml_content = call_args[0][1]
+    assert "in_use" in xml_content
+    assert ">false<" in xml_content
+    assert "finished_at" in xml_content
 
 
 # Test VMManager (mocked)

@@ -21,7 +21,7 @@ import datetime
 import json
 import os
 import sys
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock, MagicMock, patch
 
 import pytest
 
@@ -422,11 +422,17 @@ class TestRecordTaskResult:
         assert play_end.endswith('Z')
 
     def test_noop_when_no_current_task(self, callback):
-        """Does nothing when no task is active (no crash)."""
+        """Does nothing when no task is active (no crash, no
+        side effects)."""
         callback._current_task = None
+        results_before = list(callback.results)
+        play_before = callback._current_play
         result = _mock_result()
         # Should not raise
         callback._record_task_result(result, 'ok')
+        # Should not modify results or _current_play
+        assert callback.results == results_before
+        assert callback._current_play is play_before
 
 
 # ── TestPlayLifecycle ─────────────────────────────────────────────
@@ -964,6 +970,315 @@ class TestForwardingMethods:
         result = _mock_result()
         # Should not raise
         callback.v2_runner_item_on_skipped(result)
+
+
+# ── TestRecordBeforeSuperOrdering ─────────────────────────────────
+
+
+class TestRecordBeforeSuperOrdering:
+    """Verify that v2_runner_on_ok/failed/skipped/unreachable call
+    _record_task_result BEFORE super(), so that even if the parent
+    destroys result._result['results'], the JSON still has loop data.
+    """
+
+    def _make_destructive_parent(self, method_name):
+        """Return a function that deletes result._result['results']
+        like the parent's _process_items does."""
+        def destructive(self_cb, result, *args, **kwargs):
+            result._result.pop('results', None)
+        return destructive
+
+    def _run_ordering_test(self, callback, method_name, **kwargs):
+        """Set up a loop result, make the parent destructive,
+        call the method, and assert JSON has loop data."""
+        callback.v2_playbook_on_play_start(_mock_play())
+        task = _mock_task(action='yum')
+        task.loop = 'items'
+        callback.v2_playbook_on_task_start(
+            task, is_conditional=False
+        )
+
+        items = [
+            {'item': 'pkg1', 'changed': True},
+            {'item': 'pkg2', 'changed': False},
+        ]
+        result = _mock_result(
+            task=task,
+            result_data={
+                'changed': True,
+                'results': list(items),
+            },
+        )
+
+        original = getattr(_MockDefaultCallback, method_name)
+        setattr(
+            _MockDefaultCallback,
+            method_name,
+            self._make_destructive_parent(method_name),
+        )
+        try:
+            getattr(callback, method_name)(result, **kwargs)
+        finally:
+            setattr(
+                _MockDefaultCallback, method_name, original
+            )
+
+        host_data = (
+            callback.results[0]['tasks'][0]['hosts']['testhost']
+        )
+        assert 'results' in host_data
+        assert len(host_data['results']) == 2
+        assert host_data['results'][0]['item'] == 'pkg1'
+
+    def test_ok_records_before_super(self, callback):
+        """v2_runner_on_ok records loop data before parent
+        destroys it."""
+        self._run_ordering_test(callback, 'v2_runner_on_ok')
+
+    def test_failed_records_before_super(self, callback):
+        """v2_runner_on_failed records loop data before parent
+        destroys it."""
+        self._run_ordering_test(
+            callback, 'v2_runner_on_failed',
+            ignore_errors=False,
+        )
+
+    def test_skipped_records_before_super(self, callback):
+        """v2_runner_on_skipped records loop data before parent
+        destroys it."""
+        self._run_ordering_test(
+            callback, 'v2_runner_on_skipped',
+        )
+
+    def test_unreachable_records_before_super(self, callback):
+        """v2_runner_on_unreachable records loop data before
+        parent destroys it."""
+        self._run_ordering_test(
+            callback, 'v2_runner_on_unreachable',
+        )
+
+
+# ── TestDeepCopyIndependence ─────────────────────────────────────
+
+
+class TestDeepCopyIndependence:
+    """Verify that recorded data is independent of later mutations
+    to the original result object (deep copy, not reference)."""
+
+    def test_recorded_data_independent_of_result_mutations(
+        self, callback,
+    ):
+        """Mutating nested data after recording does not affect
+        the JSON output."""
+        callback.v2_playbook_on_play_start(_mock_play())
+        task = _mock_task()
+        callback.v2_playbook_on_task_start(
+            task, is_conditional=False
+        )
+
+        nested = {'key': 'original'}
+        result = _mock_result(
+            task=task,
+            result_data={
+                'changed': False,
+                'nested': nested,
+                'items': [1, 2, 3],
+            },
+        )
+        callback._record_task_result(result, 'ok')
+
+        # Mutate the original data after recording
+        nested['key'] = 'mutated'
+        result._result['items'].append(999)
+
+        host_data = (
+            callback.results[0]['tasks'][0]['hosts']['testhost']
+        )
+        assert host_data['nested']['key'] == 'original'
+        assert host_data['items'] == [1, 2, 3]
+
+
+# ── TestSuperCalls ───────────────────────────────────────────────
+
+
+class TestSuperCalls:
+    """Verify that each overridden method calls super() on the
+    parent class."""
+
+    def test_ok_calls_super(self, callback):
+        """v2_runner_on_ok calls parent's v2_runner_on_ok."""
+        callback.v2_playbook_on_play_start(_mock_play())
+        task = _mock_task()
+        callback.v2_playbook_on_task_start(
+            task, is_conditional=False
+        )
+        result = _mock_result(task=task)
+
+        with patch.object(
+            _MockDefaultCallback, 'v2_runner_on_ok',
+        ) as spy:
+            callback.v2_runner_on_ok(result)
+            spy.assert_called_once_with(result)
+
+    def test_failed_calls_super(self, callback):
+        """v2_runner_on_failed calls parent's
+        v2_runner_on_failed."""
+        callback.v2_playbook_on_play_start(_mock_play())
+        task = _mock_task()
+        callback.v2_playbook_on_task_start(
+            task, is_conditional=False
+        )
+        result = _mock_result(task=task)
+
+        with patch.object(
+            _MockDefaultCallback, 'v2_runner_on_failed',
+        ) as spy:
+            callback.v2_runner_on_failed(
+                result, ignore_errors=True,
+            )
+            spy.assert_called_once_with(result, True)
+
+    def test_skipped_calls_super(self, callback):
+        """v2_runner_on_skipped calls parent's
+        v2_runner_on_skipped."""
+        callback.v2_playbook_on_play_start(_mock_play())
+        task = _mock_task()
+        callback.v2_playbook_on_task_start(
+            task, is_conditional=False
+        )
+        result = _mock_result(task=task)
+
+        with patch.object(
+            _MockDefaultCallback, 'v2_runner_on_skipped',
+        ) as spy:
+            callback.v2_runner_on_skipped(result)
+            spy.assert_called_once_with(result)
+
+    def test_unreachable_calls_super(self, callback):
+        """v2_runner_on_unreachable calls parent's
+        v2_runner_on_unreachable."""
+        callback.v2_playbook_on_play_start(_mock_play())
+        task = _mock_task()
+        callback.v2_playbook_on_task_start(
+            task, is_conditional=False
+        )
+        result = _mock_result(task=task)
+
+        with patch.object(
+            _MockDefaultCallback, 'v2_runner_on_unreachable',
+        ) as spy:
+            callback.v2_runner_on_unreachable(result)
+            spy.assert_called_once_with(result)
+
+
+# ── TestCurrentPlayNoneGuards ────────────────────────────────────
+
+
+class TestCurrentPlayNoneGuards:
+    """Tests for _current_play being None guards in production
+    code (lines 208-209, 235)."""
+
+    def test_task_start_without_play_sets_current_task(
+        self, callback,
+    ):
+        """v2_playbook_on_task_start without a play still sets
+        _current_task but does not crash."""
+        callback._current_play = None
+        task = _mock_task(name='Orphan task')
+        callback.v2_playbook_on_task_start(
+            task, is_conditional=False
+        )
+
+        assert callback._current_task is not None
+        assert (
+            callback._current_task['task']['name']
+            == 'Orphan task'
+        )
+        # No tasks appended anywhere since there's no play
+        assert callback.results == []
+
+    def test_include_without_play_does_not_crash(
+        self, callback,
+    ):
+        """v2_playbook_on_include without a play does not crash
+        (the guard at line 235 prevents append)."""
+        callback._current_play = None
+        included_file = Mock()
+        included_file._filename = '/tasks/inc.yml'
+        host = Mock()
+        host.name = 'h1'
+        included_file._hosts = [host]
+        included_file._vars = {}
+
+        # Should not raise
+        callback.v2_playbook_on_include(included_file)
+        assert callback.results == []
+
+    def test_record_task_result_without_play_updates_task_only(
+        self, callback,
+    ):
+        """_record_task_result without _current_play still records
+        the host result and task duration, just skips play
+        duration update."""
+        callback._current_play = None
+        callback._current_task = callback._new_task(_mock_task())
+
+        result = _mock_result(
+            result_data={'changed': True, 'msg': 'done'},
+        )
+        callback._record_task_result(result, 'ok')
+
+        host_data = callback._current_task['hosts']['testhost']
+        assert host_data['msg'] == 'done'
+        assert (
+            'end'
+            in callback._current_task['task']['duration']
+        )
+
+
+# ── TestCustomStatsHostObjectKeys ────────────────────────────────
+
+
+class TestCustomStatsHostObjectKeys:
+    """Test the hasattr(k, 'get_name') branch in
+    v2_playbook_on_stats (line 349)."""
+
+    def test_custom_stats_with_host_object_keys(
+        self, callback, tmp_path,
+    ):
+        """When custom stats keys are host objects with
+        get_name(), use get_name() as the dict key."""
+        callback.v2_playbook_on_play_start(_mock_play())
+
+        host_obj = Mock()
+        host_obj.get_name = Mock(return_value='web-1')
+
+        custom = {
+            host_obj: {'deploy_time': 42},
+            '_run': {'total_deploys': 5},
+        }
+        stats = _mock_stats(
+            host_summaries={
+                'web-1': {
+                    'ok': 5, 'changed': 0,
+                    'unreachable': 0, 'failures': 0,
+                    'skipped': 0, 'rescued': 0, 'ignored': 0,
+                },
+            },
+            custom=custom,
+        )
+        callback.v2_playbook_on_stats(stats)
+
+        with open(callback.json_log_path) as f:
+            output = json.load(f)
+
+        assert output['custom_stats'] == {
+            'web-1': {'deploy_time': 42},
+        }
+        assert output['global_custom_stats'] == {
+            'total_deploys': 5,
+        }
+        host_obj.get_name.assert_called_once()
 
 
 # ── TestEmptyPlaybook ─────────────────────────────────────────────
