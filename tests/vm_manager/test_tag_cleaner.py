@@ -2508,6 +2508,127 @@ class TestRepairFlow:
             # Called once in finally block
             mock_stop.assert_called_once_with("test-uuid-123")
 
+    @pytest.mark.asyncio
+    async def test_script_success_stops_tracker_once_via_repair(
+        self, mock_conn, ssh_checker, vm_tracker, mock_domain
+    ):
+        """Full path: script succeeds → _handle_successful_repair calls
+        stop_monitoring → tracking_stopped=True → finally block does NOT
+        call stop_monitoring again. Total: exactly one stop_monitoring call
+        (inside _handle_successful_repair, not in finally)."""
+        mock_conn.lookupByName.return_value = mock_domain
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+            on_broken="/path/to/handler.sh",
+            on_broken_delay=0,
+        )
+
+        with patch.object(cleaner, '_wait_for_vm_ssh',
+                         new_callable=AsyncMock) as mock_wait, \
+             patch('vm_manager.tag_cleaner.add_vm_tag'), \
+             patch('vm_manager.tag_cleaner.get_vm_tags', return_value=[]), \
+             patch('asyncio.create_subprocess_exec',
+                   new_callable=AsyncMock) as mock_exec, \
+             patch.object(vm_tracker, 'stop_monitoring',
+                         new_callable=AsyncMock) as mock_stop:
+
+            mock_wait.side_effect = [
+                ("10.0.0.5", "timeout"),  # Phase 1
+                ("10.0.0.5", "timeout"),  # Phase 2
+            ]
+
+            mock_proc = AsyncMock()
+            mock_proc.communicate.return_value = (b"", b"")
+            mock_proc.returncode = 0
+            mock_exec.return_value = mock_proc
+
+            await cleaner._monitor_vm("test-uuid-123", "test-vm")
+
+            # stop_monitoring called exactly once (by _handle_successful_repair),
+            # NOT again by the finally block (tracking_stopped=True)
+            mock_stop.assert_called_once_with("test-uuid-123")
+
+    @pytest.mark.asyncio
+    async def test_handle_successful_repair_lookupByName_failure(
+        self, mock_conn, ssh_checker, vm_tracker, mock_domain
+    ):
+        """If lookupByName fails during repair (VM destroyed), the
+        exception is caught and logged. stop_monitoring still ran
+        (it happens first), but handle_vm_started was not called."""
+        mock_conn.lookupByName.side_effect = Exception(
+            "VM not found"
+        )
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+        )
+
+        with patch.object(vm_tracker, 'stop_monitoring',
+                         new_callable=AsyncMock) as mock_stop, \
+             patch.object(cleaner, 'handle_vm_started',
+                         new_callable=AsyncMock) as mock_handle:
+
+            # Should not raise
+            await cleaner._handle_successful_repair(
+                "test-vm", "test-uuid-123"
+            )
+
+            # stop_monitoring was called (it's before lookupByName)
+            mock_stop.assert_awaited_once_with("test-uuid-123")
+            # handle_vm_started was NOT called (lookupByName failed)
+            mock_handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_during_repair_does_not_crash(
+        self, mock_conn, ssh_checker, vm_tracker, mock_domain
+    ):
+        """CancelledError during _handle_successful_repair propagates
+        correctly. stop_monitoring may have already been called inside
+        _handle_successful_repair, but tracking_stopped was not set to
+        True, so the finally block calls stop_monitoring again (which
+        is safe because stop_monitoring is idempotent)."""
+        mock_conn.lookupByName.return_value = mock_domain
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+            on_broken="/path/to/handler.sh",
+            on_broken_delay=0,
+        )
+
+        call_count = 0
+
+        async def mock_repair(*args):
+            nonlocal call_count
+            call_count += 1
+            # Simulate: stop_monitoring ran inside _handle_successful_repair,
+            # but CancelledError hit before tracking_stopped was set
+            await vm_tracker.stop_monitoring("test-uuid-123")
+            raise asyncio.CancelledError()
+
+        with patch.object(cleaner, '_wait_for_vm_ssh',
+                         new_callable=AsyncMock) as mock_wait, \
+             patch('vm_manager.tag_cleaner.add_vm_tag'), \
+             patch.object(cleaner, '_run_on_broken_script',
+                         new_callable=AsyncMock, return_value=True), \
+             patch.object(cleaner, '_handle_successful_repair',
+                         side_effect=mock_repair):
+
+            mock_wait.side_effect = [
+                ("10.0.0.5", "timeout"),  # Phase 1
+                ("10.0.0.5", "timeout"),  # Phase 2
+            ]
+
+            with pytest.raises(asyncio.CancelledError):
+                await cleaner._monitor_vm("test-uuid-123", "test-vm")
+
+            # _handle_successful_repair was called
+            assert call_count == 1
+            # tracking_stopped was NOT set (CancelledError hit before),
+            # so finally block also called stop_monitoring. This is safe
+            # because stop_monitoring is idempotent (pops None if already
+            # freed).
+
 
 class TestCancelledErrorHandling:
     """Tests for CancelledError propagation and process cleanup."""
