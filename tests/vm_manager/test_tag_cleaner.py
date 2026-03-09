@@ -1352,10 +1352,11 @@ class TestTwoPhaseTimeout:
     # -- Tracker management ----------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_tracker_freed_before_phase2(
+    async def test_tracker_stays_occupied_during_phase2(
         self, mock_conn, ssh_checker, vm_tracker, mock_domain
     ):
-        """Tracker slot is freed before Phase 2 starts."""
+        """Tracker slot stays occupied during Phase 2 to prevent
+        concurrent monitoring sessions from event handlers and stale scans."""
         mock_conn.lookupByName.return_value = mock_domain
         cleaner = TagCleaner(
             conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
@@ -1371,7 +1372,9 @@ class TestTwoPhaseTimeout:
             await original_stop(uuid)
 
         async def tracking_wait(*args, **kwargs):
-            call_order.append(f"wait_for_vm_ssh_{len([x for x in call_order if x.startswith('wait')])}")
+            call_order.append(
+                f"wait_for_vm_ssh_{len([x for x in call_order if x.startswith('wait')])}"
+            )
             return ("10.0.0.5", "timeout")
 
         with patch.object(cleaner, '_wait_for_vm_ssh',
@@ -1384,14 +1387,15 @@ class TestTwoPhaseTimeout:
 
             await cleaner._monitor_vm("test-uuid-123", "test-vm")
 
-        # stop_monitoring must happen between Phase 1 and Phase 2
+        # stop_monitoring must happen AFTER Phase 2 (in finally block),
+        # not between Phase 1 and Phase 2.
         assert "stop_monitoring" in call_order
         stop_idx = call_order.index("stop_monitoring")
-        # Phase 2 wait comes after stop_monitoring
-        phase2_indices = [i for i, x in enumerate(call_order)
-                         if x.startswith("wait") and i > 0]
-        assert len(phase2_indices) > 0
-        assert stop_idx < phase2_indices[0]
+        # Both waits should come before stop_monitoring
+        wait_indices = [i for i, x in enumerate(call_order)
+                       if x.startswith("wait")]
+        assert len(wait_indices) == 2
+        assert all(w < stop_idx for w in wait_indices)
 
     @pytest.mark.asyncio
     async def test_tracker_not_double_freed(
@@ -2259,11 +2263,12 @@ class TestRepairFlow:
         return VMTracker()
 
     @pytest.mark.asyncio
-    async def test_tracker_freed_before_on_broken_script(
+    async def test_tracker_stays_occupied_during_on_broken_script(
         self, mock_conn, ssh_checker, vm_tracker, mock_domain
     ):
-        """Tracker slot is freed BEFORE the on-broken script runs,
-        so if the script restarts the VM, new events aren't debounced."""
+        """Tracker slot stays occupied during Phase 2 (including the
+        on-broken script), preventing duplicate monitoring. It is only
+        freed in the finally block after Phase 2 completes."""
         mock_conn.lookupByName.return_value = mock_domain
         cleaner = TagCleaner(
             conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
@@ -2303,8 +2308,10 @@ class TestRepairFlow:
         assert "run_on_broken_script" in call_order
         stop_idx = call_order.index("stop_monitoring")
         script_idx = call_order.index("run_on_broken_script")
-        assert stop_idx < script_idx, (
-            "stop_monitoring must be called before _run_on_broken_script"
+        # Script runs first, tracker freed after (in finally block)
+        assert script_idx < stop_idx, (
+            "run_on_broken_script must complete before "
+            "stop_monitoring (tracker stays occupied during Phase 2)"
         )
 
     @pytest.mark.asyncio
@@ -2343,9 +2350,9 @@ class TestRepairFlow:
     async def test_handle_successful_repair_triggers_monitoring(
         self, mock_conn, ssh_checker, vm_tracker, mock_domain
     ):
-        """After repair, handle_vm_started is called to start fresh
-        monitoring. The broken tag is NOT removed — only SSH success
-        should remove it."""
+        """After repair, stop_monitoring is called to free the tracker
+        slot, then handle_vm_started starts fresh monitoring. The broken
+        tag is NOT removed — only SSH success should remove it."""
         mock_conn.lookupByName.return_value = mock_domain
         cleaner = TagCleaner(
             conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
@@ -2354,13 +2361,49 @@ class TestRepairFlow:
 
         with patch('vm_manager.tag_cleaner.remove_vm_tag') as mock_remove, \
              patch.object(cleaner, 'handle_vm_started',
-                         new_callable=AsyncMock) as mock_handle:
+                         new_callable=AsyncMock) as mock_handle, \
+             patch.object(vm_tracker, 'stop_monitoring',
+                         new_callable=AsyncMock) as mock_stop:
 
             await cleaner._handle_successful_repair("test-vm", "test-uuid-123")
 
+            mock_stop.assert_awaited_once_with("test-uuid-123")
             mock_handle.assert_awaited_once_with(mock_domain)
             # Broken tag NOT removed — only SSH success should do that
             mock_remove.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handle_successful_repair_frees_tracker_before_monitoring(
+        self, mock_conn, ssh_checker, vm_tracker, mock_domain
+    ):
+        """stop_monitoring must be called BEFORE handle_vm_started
+        so the fresh monitoring session can register with the tracker."""
+        mock_conn.lookupByName.return_value = mock_domain
+        cleaner = TagCleaner(
+            conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
+            tags_to_remove=["used"], broken_tag="broken",
+        )
+
+        call_order = []
+        original_stop = vm_tracker.stop_monitoring
+
+        async def tracking_stop(uuid):
+            call_order.append("stop_monitoring")
+            await original_stop(uuid)
+
+        async def tracking_handle(domain):
+            call_order.append("handle_vm_started")
+
+        with patch.object(vm_tracker, 'stop_monitoring',
+                         side_effect=tracking_stop), \
+             patch.object(cleaner, 'handle_vm_started',
+                         side_effect=tracking_handle):
+
+            await cleaner._handle_successful_repair(
+                "test-vm", "test-uuid-123"
+            )
+
+        assert call_order == ["stop_monitoring", "handle_vm_started"]
 
     @pytest.mark.asyncio
     async def test_no_repair_when_script_fails(
@@ -2438,8 +2481,8 @@ class TestRepairFlow:
     async def test_tracker_not_double_freed_on_timeout_path(
         self, mock_conn, ssh_checker, vm_tracker, mock_domain
     ):
-        """On timeout path, stop_monitoring is called exactly once
-        (before Phase 2), not again in the finally block."""
+        """On timeout path (script fails), stop_monitoring is called
+        exactly once in the finally block."""
         mock_conn.lookupByName.return_value = mock_domain
         cleaner = TagCleaner(
             conn=mock_conn, ssh_checker=ssh_checker, vm_tracker=vm_tracker,
@@ -2462,7 +2505,7 @@ class TestRepairFlow:
 
             await cleaner._monitor_vm("test-uuid-123", "test-vm")
 
-            # Called once (before Phase 2), NOT again in finally
+            # Called once in finally block
             mock_stop.assert_called_once_with("test-uuid-123")
 
 

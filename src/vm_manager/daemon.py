@@ -106,14 +106,21 @@ class VMManagerDaemon:
         self.on_broken_retry_delay = on_broken_retry_delay
         self.stale_scan_interval = stale_scan_interval
 
-        # Auto-exclude broken VMs from monitoring/booting.
-        # Without this, the daemon would re-monitor broken VMs on every
-        # reboot or --check-existing cycle, wait for SSH to time out again,
-        # and re-add the broken tag — creating an infinite loop.
+        # Auto-exclude broken VMs from the primary monitoring filter.
+        # _should_monitor_vm() uses this to reject broken VMs in the
+        # normal path (boot loops, stale scans for 'used' tags, etc.).
+        #
+        # However, broken VMs are NOT fully ignored — the event handler,
+        # stale scan, and startup scan each have a secondary check via
+        # _is_broken_and_recoverable() that detects VMs with the broken
+        # tag and starts recovery monitoring (SSH check → remove broken
+        # tag if healthy, or proceed to on-broken script if not).
         if self.broken_tag and self.broken_tag not in self.exclude_tags:
             self.exclude_tags.append(self.broken_tag)
             logger.info(
-                f"Auto-excluding VMs with '{self.broken_tag}' tag from monitoring"
+                f"Auto-excluding VMs with '{self.broken_tag}' tag "
+                "from primary monitoring filter "
+                "(broken VMs are still checked for recovery)"
             )
 
         # Components (initialized in start())
@@ -281,37 +288,60 @@ class VMManagerDaemon:
         """
         Handle a VM start event (called by EventMonitor).
 
+        Checks two paths:
+        1. Normal monitoring: VM matches filters and has removable tags
+        2. Broken recovery: VM has broken tag but otherwise matches filters
+
         Args:
             domain: The domain that started
         """
         try:
             vm_name = domain.name()
 
-            # Check if VM matches our filters
-            if not self._should_monitor_vm(domain):
-                logger.debug(f"VM {vm_name} does not match filters, ignoring")
-                return
+            # Normal path: VM matches all filters (including broken exclusion)
+            if self._should_monitor_vm(domain):
+                # Check if VM actually has the tags we need to remove.
+                # Without this check, reboot events from reset_vm() cleanup
+                # (which happen AFTER the 'used' tag was already removed)
+                # would create orphaned monitor tasks that poll SSH forever.
+                vm_tags = get_vm_tags(domain)
+                if not any(tag in vm_tags for tag in self.tags_to_remove):
+                    logger.debug(
+                        f"VM {vm_name} has no removable tags "
+                        f"(has: {vm_tags}, need: {self.tags_to_remove})"
+                        ", ignoring reboot event"
+                    )
+                    return
 
-            # Check if VM actually has the tags we need to remove.
-            # Without this check, reboot events from reset_vm() cleanup
-            # (which happen AFTER the 'used' tag was already removed)
-            # would create orphaned monitor tasks that poll SSH forever.
-            vm_tags = get_vm_tags(domain)
-            if not any(tag in vm_tags for tag in self.tags_to_remove):
-                logger.debug(
-                    f"VM {vm_name} has no removable tags "
-                    f"(has: {vm_tags}, need: {self.tags_to_remove}), "
-                    "ignoring reboot event"
+                logger.info(f"VM {vm_name} started and matches filters")
+                asyncio.create_task(
+                    self.tag_cleaner.handle_vm_started(domain)
                 )
                 return
 
-            logger.info(f"VM {vm_name} started and matches filters")
+            # Broken recovery path: VM has broken tag but otherwise
+            # matches required tags. Start monitoring to SSH-check
+            # the VM — if healthy, remove the broken tag; if not,
+            # proceed through Phase 2 and on-broken script.
+            if self._is_broken_and_recoverable(domain):
+                logger.info(
+                    f"VM {vm_name} has broken tag, "
+                    "starting recovery monitoring"
+                )
+                asyncio.create_task(
+                    self.tag_cleaner.handle_vm_started(domain)
+                )
+                return
 
-            # Pass to tag cleaner for processing
-            asyncio.create_task(self.tag_cleaner.handle_vm_started(domain))
+            logger.debug(
+                f"VM {vm_name} does not match filters, ignoring"
+            )
 
         except Exception as e:
-            logger.error(f"Error handling VM start event: {e}", exc_info=True)
+            logger.error(
+                f"Error handling VM start event: {e}",
+                exc_info=True
+            )
 
     def _handle_vm_stopped(self, domain: libvirt.virDomain) -> None:
         """
@@ -388,13 +418,60 @@ class VMManagerDaemon:
             logger.warning(f"Error checking if VM {domain.name()} is stale: {e}")
             return False
 
+    def _is_broken_and_recoverable(
+        self, domain: libvirt.virDomain
+    ) -> bool:
+        """
+        Check if a VM has the broken tag and should be recovery-monitored.
+
+        Returns True if the VM has the broken tag AND matches the required
+        monitoring tags (ignoring the broken tag exclusion). This detects
+        VMs that were tagged broken externally (manually, by another tool,
+        or by a previous vm-manager session) so they can be SSH-checked
+        and either recovered or sent through the on-broken script flow.
+
+        Args:
+            domain: The domain to check
+
+        Returns:
+            True if the VM has the broken tag and matches base filters
+        """
+        if not self.broken_tag:
+            return False
+
+        try:
+            vm_tags = get_vm_tags(domain)
+
+            if self.broken_tag not in vm_tags:
+                return False
+
+            # Check required tags and non-broken exclusions
+            exclude_without_broken = [
+                t for t in self.exclude_tags
+                if t != self.broken_tag
+            ]
+            return vm_matches_tags(
+                vm_tags=vm_tags,
+                required_tags=self.monitor_tags,
+                exclude_tags=exclude_without_broken
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Error checking broken VM tags for "
+                f"{domain.name()}: {e}"
+            )
+            return False
+
     async def _check_existing_vms(self) -> None:
         """
         Check existing running VMs at startup (--check-existing mode).
 
-        Scans all running VMs and starts SSH monitoring for any that match
-        filters and have removable tags.  Both "stale" (in_use=false) and
-        actively-in-use VMs go through the same SSH monitoring path so that
+        Scans all running VMs and starts SSH monitoring for any that:
+        1. Match filters and have removable tags (normal monitoring)
+        2. Have the broken tag and match base filters (recovery monitoring)
+
+        Both paths go through the same SSH monitoring pipeline so that
         broken VMs are detected and handled via the --on-broken mechanism.
         """
         logger.info("Checking existing running VMs")
@@ -409,24 +486,36 @@ class VMManagerDaemon:
 
             for domain in domains:
                 try:
-                    if not self._should_monitor_vm(domain):
-                        continue
-
                     vm_name = domain.name()
 
-                    # Check if VM has any removable tags
-                    vm_tags = get_vm_tags(domain)
-                    has_removable = any(tag in vm_tags for tag in self.tags_to_remove)
-                    if not has_removable:
+                    # Normal path: matches filters and has removable tags
+                    if self._should_monitor_vm(domain):
+                        vm_tags = get_vm_tags(domain)
+                        has_removable = any(
+                            tag in vm_tags
+                            for tag in self.tags_to_remove
+                        )
+                        if has_removable:
+                            logger.info(
+                                f"Processing existing VM: {vm_name}"
+                            )
+                            await self.tag_cleaner.handle_vm_started(
+                                domain
+                            )
                         continue
 
-                    # Route all VMs with removable tags through SSH monitoring.
-                    # Previously, stale VMs (in_use=false) had their tags
-                    # removed directly without SSH verification. This allowed
-                    # broken VMs to have their 'used' tag silently removed
-                    # every scan cycle without ever being detected as broken.
-                    logger.info(f"Processing existing VM: {vm_name}")
-                    await self.tag_cleaner.handle_vm_started(domain)
+                    # Broken recovery path: has broken tag, matches
+                    # base filters. Start monitoring to SSH-check and
+                    # recover.
+                    if self._is_broken_and_recoverable(domain):
+                        logger.info(
+                            f"Processing existing broken VM: "
+                            f"{vm_name}"
+                        )
+                        await self.tag_cleaner.handle_vm_started(
+                            domain
+                        )
+
                 except Exception as e:
                     logger.error(
                         f"Error processing existing VM: {e}",
@@ -434,7 +523,10 @@ class VMManagerDaemon:
                     )
 
         except Exception as e:
-            logger.error(f"Error checking existing VMs: {e}", exc_info=True)
+            logger.error(
+                f"Error checking existing VMs: {e}",
+                exc_info=True
+            )
 
     async def _stale_tag_scan_loop(self) -> None:
         """
@@ -473,50 +565,68 @@ class VMManagerDaemon:
         """
         Run a single stale tag scan across all running VMs.
 
-        Finds VMs with stale removable tags (in_use=false + 'used' tag) and
-        starts SSH monitoring for them.  If the VM is reachable, the tags are
-        removed normally.  If SSH times out, the VM is marked broken and the
-        ``--on-broken`` script runs.
-
-        Previously this method removed stale tags directly without SSH
-        verification.  That allowed broken VMs to have their 'used' tag
-        silently removed every scan cycle, preventing the ``--on-broken``
-        repair mechanism from ever triggering.
+        Checks two conditions:
+        1. Stale removable tags (in_use=false + 'used' tag) — starts SSH
+           monitoring to verify the VM before removing tags.
+        2. Broken tag present — starts recovery monitoring to SSH-check
+           the VM and either remove the broken tag (if healthy) or proceed
+           through Phase 2 and the on-broken script (if not).
         """
         try:
             domains = self.conn.listAllDomains(
                 libvirt.VIR_CONNECT_LIST_DOMAINS_RUNNING
             )
         except Exception as e:
-            logger.error(f"Failed to list domains for stale scan: {e}")
+            logger.error(
+                f"Failed to list domains for stale scan: {e}"
+            )
             return
 
         started = 0
         for domain in domains:
             try:
-                if not self._should_monitor_vm(domain):
-                    continue
-
                 vm_name = domain.name()
                 vm_uuid = domain.UUIDString()
 
-                # Skip VMs currently being monitored (SSH wait in progress)
-                if self.vm_tracker and await self.vm_tracker.is_monitoring(vm_uuid):
+                # Skip VMs currently being monitored
+                if (
+                    self.vm_tracker
+                    and await self.vm_tracker.is_monitoring(vm_uuid)
+                ):
                     continue
 
-                if self._is_vm_stale(domain):
+                # Check 1: stale removable tags (normal path)
+                if self._should_monitor_vm(domain):
+                    if self._is_vm_stale(domain):
+                        logger.info(
+                            f"Stale tag scan: VM {vm_name} has stale "
+                            "removable tags, starting SSH monitoring"
+                        )
+                        await self.tag_cleaner.handle_vm_started(
+                            domain
+                        )
+                        started += 1
+                    continue
+
+                # Check 2: broken tag recovery
+                if self._is_broken_and_recoverable(domain):
                     logger.info(
-                        f"Stale tag scan: VM {vm_name} has stale removable tags, "
-                        "starting SSH monitoring"
+                        f"Stale tag scan: VM {vm_name} has broken "
+                        "tag, starting recovery monitoring"
                     )
                     await self.tag_cleaner.handle_vm_started(domain)
                     started += 1
 
             except Exception as e:
-                logger.error(f"Error scanning VM for stale tags: {e}")
+                logger.error(
+                    f"Error scanning VM for stale tags: {e}"
+                )
 
         if started > 0:
-            logger.info(f"Stale tag scan: started monitoring {started} VM(s)")
+            logger.info(
+                f"Stale tag scan: started monitoring "
+                f"{started} VM(s)"
+            )
         else:
             logger.debug("Stale tag scan: no stale tags found")
 

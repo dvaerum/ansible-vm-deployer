@@ -328,11 +328,11 @@ class TagCleaner:
             )
             await self._mark_vm_broken(vm_name, vm_uuid)
 
-            # Free tracker slot before Phase 2. This allows new monitoring
-            # sessions if the VM is restarted externally. The broken tag
-            # in exclude_tags prevents duplicate monitoring.
-            await self.vm_tracker.stop_monitoring(vm_uuid)
-            tracking_stopped = True
+            # Keep the tracker slot occupied during Phase 2. This prevents
+            # event handlers and stale scans from starting concurrent
+            # monitoring sessions for the same VM. The slot is freed when
+            # Phase 2 completes (via the finally block) or explicitly in
+            # _handle_successful_repair before starting fresh monitoring.
 
             # ── Phase 2: Continue monitoring SSH ─────────────────────
             if self.on_broken:
@@ -383,6 +383,9 @@ class TagCleaner:
                 )
                 if script_ok:
                     await self._handle_successful_repair(vm_name, vm_uuid)
+                    # Repair freed the tracker and started fresh monitoring.
+                    # Prevent the finally block from freeing the new session.
+                    tracking_stopped = True
                 return
 
             # auth_failure or unexpected result in Phase 2
@@ -452,10 +455,10 @@ class TagCleaner:
         """
         Handle post-repair actions after an on-broken script succeeds.
 
-        Triggers a fresh monitoring session while keeping the broken tag.
-        The broken tag is only removed when SSH actually succeeds during
-        re-monitoring — a successful script exit code alone does not prove
-        the VM is healthy.
+        Frees the tracker slot and triggers a fresh monitoring session
+        while keeping the broken tag. The broken tag is only removed
+        when SSH actually succeeds during re-monitoring — a successful
+        script exit code alone does not prove the VM is healthy.
 
         The on-broken script typically restarts the VM (e.g.,
         reset-vm-disks.sh), so by this point the VM is running with fresh
@@ -470,6 +473,10 @@ class TagCleaner:
             vm_uuid: VM UUID
         """
         try:
+            # Free the tracker slot so handle_vm_started can register
+            # the fresh monitoring session.
+            await self.vm_tracker.stop_monitoring(vm_uuid)
+
             loop = asyncio.get_running_loop()
             domain = await loop.run_in_executor(
                 None, self.conn.lookupByName, vm_name

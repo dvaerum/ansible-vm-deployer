@@ -385,18 +385,70 @@ class TestHandleVMStarted:
     @patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test"])
     def test_should_monitor_returns_false_prevents_tag_check(self, _m_tags, _m_matches):
         """When _should_monitor_vm returns False, get_vm_tags for removable-tag
-        check should NOT be reached (we return early)."""
+        check should NOT be reached (we return early via broken recovery path)."""
         d = self._setup_daemon_with_tag_cleaner()
         domain = _make_domain()
 
         d._handle_vm_started(domain)
 
         d.tag_cleaner.handle_vm_started.assert_not_called()
-        # get_vm_tags is called once inside _should_monitor_vm, but we
-        # should NOT see a second call for the removable-tag check.
-        # The first call comes from _should_monitor_vm -> get_vm_tags.
-        # The second would come from the removable tag guard.
-        # Since _should_monitor_vm returned False, we returned early.
+
+    # -- Broken recovery path: VM has broken tag but matches base filters --
+
+    def test_broken_vm_starts_recovery_monitoring(self):
+        """VM rejected by _should_monitor_vm but accepted by
+        _is_broken_and_recoverable starts recovery monitoring."""
+        d = self._setup_daemon_with_tag_cleaner(broken_tag="broken")
+
+        domain = _make_domain("broken-vm")
+
+        with patch.object(d, "_should_monitor_vm", return_value=False), \
+             patch.object(d, "_is_broken_and_recoverable", return_value=True):
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(self._call_handle_vm_started(d, domain))
+            finally:
+                loop.close()
+
+        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(domain)
+
+    def test_broken_vm_not_recoverable_is_ignored(self):
+        """VM rejected by both _should_monitor_vm and
+        _is_broken_and_recoverable is ignored."""
+        d = self._setup_daemon_with_tag_cleaner(broken_tag="broken")
+
+        domain = _make_domain("unrelated-vm")
+
+        with patch.object(d, "_should_monitor_vm", return_value=False), \
+             patch.object(d, "_is_broken_and_recoverable", return_value=False):
+
+            d._handle_vm_started(domain)
+
+        d.tag_cleaner.handle_vm_started.assert_not_called()
+
+    def test_broken_recovery_path_not_reached_when_normal_path_matches(self):
+        """When _should_monitor_vm passes, the broken recovery path
+        is NOT checked — normal path takes priority."""
+        d = self._setup_daemon_with_tag_cleaner(broken_tag="broken")
+        domain = _make_domain("normal-vm")
+
+        with patch.object(d, "_should_monitor_vm", return_value=True), \
+             patch("vm_manager.daemon.get_vm_tags",
+                   return_value=["linux-test", "used"]), \
+             patch.object(d, "_is_broken_and_recoverable") as mock_broken:
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(
+                    self._call_handle_vm_started(d, domain)
+                )
+            finally:
+                loop.close()
+
+        # Normal path handled it, broken check never called
+        mock_broken.assert_not_called()
+        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(domain)
 
 
 # ===================================================================
@@ -451,6 +503,128 @@ class TestIsVMStale:
         domain = _make_domain("error-vm")
 
         assert d._is_vm_stale(domain) is False
+
+
+# ===================================================================
+# _is_broken_and_recoverable
+# ===================================================================
+
+class TestIsBrokenAndRecoverable:
+    """Tests for the broken VM recovery check."""
+
+    @patch("vm_manager.daemon.vm_matches_tags", return_value=True)
+    @patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test", "broken"])
+    def test_returns_true_when_vm_has_broken_tag_and_matches_base_filters(
+        self, _m_tags, _m_matches
+    ):
+        """VM with broken tag that matches required tags (ignoring broken
+        exclusion) should return True."""
+        d = _make_daemon(
+            monitor_tags=["linux-test"],
+            exclude_tags=["other-exclude"],
+            broken_tag="broken",
+        )
+        domain = _make_domain("broken-vm")
+
+        assert d._is_broken_and_recoverable(domain) is True
+
+        # vm_matches_tags called with exclude_tags minus "broken"
+        _m_matches.assert_called_once_with(
+            vm_tags=["linux-test", "broken"],
+            required_tags=["linux-test"],
+            exclude_tags=["other-exclude"],
+        )
+
+    @patch("vm_manager.daemon.get_vm_tags", return_value=["linux-test", "used"])
+    def test_returns_false_when_vm_has_no_broken_tag(self, _m_tags):
+        """VM without the broken tag should return False."""
+        d = _make_daemon(broken_tag="broken")
+        domain = _make_domain("normal-vm")
+
+        assert d._is_broken_and_recoverable(domain) is False
+
+    def test_returns_false_when_broken_tag_is_none(self):
+        """When broken_tag is not configured, always returns False."""
+        d = _make_daemon(broken_tag=None)
+        domain = _make_domain("any-vm")
+
+        assert d._is_broken_and_recoverable(domain) is False
+
+    @patch("vm_manager.daemon.vm_matches_tags", return_value=False)
+    @patch("vm_manager.daemon.get_vm_tags",
+           return_value=["wrong-tag", "broken"])
+    def test_returns_false_when_broken_but_no_required_tags(
+        self, _m_tags, _m_matches
+    ):
+        """VM with broken tag but missing required tags should return False."""
+        d = _make_daemon(
+            monitor_tags=["linux-test"],
+            broken_tag="broken",
+        )
+        domain = _make_domain("wrong-tags-vm")
+
+        assert d._is_broken_and_recoverable(domain) is False
+
+    @patch("vm_manager.daemon.vm_matches_tags", return_value=False)
+    @patch("vm_manager.daemon.get_vm_tags",
+           return_value=["linux-test", "broken", "other-exclude"])
+    def test_returns_false_when_has_other_exclude_tag(
+        self, _m_tags, _m_matches
+    ):
+        """VM with broken tag AND another exclude tag should return False
+        (non-broken exclusions still apply)."""
+        d = _make_daemon(
+            monitor_tags=["linux-test"],
+            exclude_tags=["other-exclude"],
+            broken_tag="broken",
+        )
+        domain = _make_domain("double-excluded-vm")
+
+        assert d._is_broken_and_recoverable(domain) is False
+
+    @patch("vm_manager.daemon.get_vm_tags",
+           side_effect=Exception("libvirt error"))
+    def test_returns_false_on_exception(self, _m_tags):
+        """Exception during tag check should return False."""
+        d = _make_daemon(broken_tag="broken")
+        domain = _make_domain("error-vm")
+
+        assert d._is_broken_and_recoverable(domain) is False
+
+    @patch("vm_manager.daemon.vm_matches_tags", return_value=True)
+    @patch("vm_manager.daemon.get_vm_tags",
+           return_value=["linux-test", "needs-repair"])
+    def test_works_with_custom_broken_tag_name(self, _m_tags, _m_matches):
+        """Works correctly with a non-default broken tag name."""
+        d = _make_daemon(broken_tag="needs-repair")
+        domain = _make_domain("custom-broken-vm")
+
+        assert d._is_broken_and_recoverable(domain) is True
+
+    @patch("vm_manager.daemon.vm_matches_tags", return_value=True)
+    @patch("vm_manager.daemon.get_vm_tags",
+           return_value=["linux-test", "broken"])
+    def test_exclude_without_broken_removes_only_broken_tag(
+        self, _m_tags, _m_matches
+    ):
+        """The exclude list passed to vm_matches_tags should contain
+        all original excludes EXCEPT the broken tag."""
+        d = _make_daemon(
+            monitor_tags=["linux-test"],
+            exclude_tags=["exc-a", "exc-b"],
+            broken_tag="broken",
+        )
+        domain = _make_domain()
+
+        d._is_broken_and_recoverable(domain)
+
+        # "broken" auto-appended to exclude_tags, but should be removed
+        # for the recoverable check. "exc-a" and "exc-b" remain.
+        _m_matches.assert_called_once_with(
+            vm_tags=["linux-test", "broken"],
+            required_tags=["linux-test"],
+            exclude_tags=["exc-a", "exc-b"],
+        )
 
 
 # ===================================================================
@@ -510,13 +684,15 @@ class TestCheckExistingVMs:
 
     @pytest.mark.asyncio
     async def test_skips_non_matching_vms(self):
-        """VMs not matching filters should be skipped entirely."""
+        """VMs not matching filters AND not broken should be skipped."""
         d = self._setup()
 
         domain = _make_domain("non-matching")
         d.conn.listAllDomains.return_value = [domain]
 
-        with patch.object(d, "_should_monitor_vm", return_value=False):
+        with patch.object(d, "_should_monitor_vm", return_value=False), \
+             patch.object(d, "_is_broken_and_recoverable",
+                          return_value=False):
             await d._check_existing_vms()
 
         d.tag_cleaner.handle_vm_started.assert_not_called()
@@ -603,6 +779,83 @@ class TestCheckExistingVMs:
 
         # Should not raise
         await d._check_existing_vms()
+
+    # -- Broken VM recovery at startup ------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_broken_vm_gets_recovery_monitoring(self):
+        """VM with broken tag at startup gets recovery monitoring."""
+        d = self._setup(broken_tag="broken")
+        domain = _make_domain("broken-vm", "uuid-broken")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=False), \
+             patch.object(d, "_is_broken_and_recoverable",
+                          return_value=True):
+            await d._check_existing_vms()
+
+        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(domain)
+
+    @pytest.mark.asyncio
+    async def test_broken_vm_not_recoverable_skipped(self):
+        """VM rejected by both filters and broken check is skipped."""
+        d = self._setup(broken_tag="broken")
+        domain = _make_domain("unrelated-vm", "uuid-unrel")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=False), \
+             patch.object(d, "_is_broken_and_recoverable",
+                          return_value=False):
+            await d._check_existing_vms()
+
+        d.tag_cleaner.handle_vm_started.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mixed_normal_and_broken_vms_at_startup(self):
+        """Both normal matching VMs and broken VMs get monitoring."""
+        d = self._setup(broken_tag="broken")
+        normal_vm = _make_domain("normal-vm", "uuid-normal")
+        broken_vm = _make_domain("broken-vm", "uuid-broken")
+        unrelated = _make_domain("unrelated-vm", "uuid-unrel")
+        d.conn.listAllDomains.return_value = [
+            normal_vm, broken_vm, unrelated
+        ]
+
+        def mock_should_monitor(domain):
+            return domain.name() == "normal-vm"
+
+        def mock_is_broken(domain):
+            return domain.name() == "broken-vm"
+
+        with patch.object(d, "_should_monitor_vm",
+                          side_effect=mock_should_monitor), \
+             patch("vm_manager.daemon.get_vm_tags",
+                   return_value=["linux-test", "used"]), \
+             patch.object(d, "_is_broken_and_recoverable",
+                          side_effect=mock_is_broken):
+            await d._check_existing_vms()
+
+        assert d.tag_cleaner.handle_vm_started.await_count == 2
+        d.tag_cleaner.handle_vm_started.assert_any_await(normal_vm)
+        d.tag_cleaner.handle_vm_started.assert_any_await(broken_vm)
+
+    @pytest.mark.asyncio
+    async def test_normal_path_takes_priority_over_broken_check(self):
+        """When _should_monitor_vm passes, _is_broken_and_recoverable
+        is NOT checked (continue skips it)."""
+        d = self._setup(broken_tag="broken")
+        domain = _make_domain("matching-vm", "uuid-match")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=True), \
+             patch("vm_manager.daemon.get_vm_tags",
+                   return_value=["linux-test", "used"]), \
+             patch.object(d, "_is_broken_and_recoverable") as mock_broken:
+            await d._check_existing_vms()
+
+        # Normal path handled it with continue, broken check never called
+        mock_broken.assert_not_called()
+        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(domain)
 
 
 # ===================================================================
@@ -828,14 +1081,16 @@ class TestRunStaleScan:
         d.tag_cleaner.handle_vm_started.assert_awaited_once_with(domain)
 
     @pytest.mark.asyncio
-    async def test_skips_non_matching_vms(self):
-        """VMs not matching tag filters should be skipped."""
+    async def test_skips_non_matching_non_broken_vms(self):
+        """VMs not matching tag filters and not broken should be skipped."""
         d = self._setup()
 
         domain = _make_domain("unrelated-vm", "uuid-unrel")
         d.conn.listAllDomains.return_value = [domain]
 
-        with patch.object(d, "_should_monitor_vm", return_value=False):
+        with patch.object(d, "_should_monitor_vm", return_value=False), \
+             patch.object(d, "_is_broken_and_recoverable",
+                          return_value=False):
             await d._run_stale_tag_scan()
 
         d.tag_cleaner.handle_vm_started.assert_not_called()
@@ -929,6 +1184,106 @@ class TestRunStaleScan:
             await d._run_stale_tag_scan()
 
         d.tag_cleaner.handle_vm_started.assert_awaited_once_with(good_domain)
+
+    # -- Broken VM recovery in stale scan ---------------------------------
+
+    @pytest.mark.asyncio
+    async def test_broken_vm_gets_recovery_monitoring(self):
+        """VM with broken tag (not matching normal filters) gets recovery
+        monitoring during stale scan."""
+        d = self._setup(broken_tag="broken")
+        domain = _make_domain("broken-vm", "uuid-broken")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=False), \
+             patch.object(d, "_is_broken_and_recoverable",
+                          return_value=True):
+            await d._run_stale_tag_scan()
+
+        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(domain)
+
+    @pytest.mark.asyncio
+    async def test_broken_vm_skipped_when_already_monitored(self):
+        """Broken VM already being monitored is skipped by stale scan."""
+        d = self._setup(broken_tag="broken")
+        d.vm_tracker.is_monitoring = AsyncMock(return_value=True)
+        domain = _make_domain("broken-vm", "uuid-broken")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=False), \
+             patch.object(d, "_is_broken_and_recoverable",
+                          return_value=True):
+            await d._run_stale_tag_scan()
+
+        d.tag_cleaner.handle_vm_started.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_scan_normal_path_skips_broken_check(self):
+        """When _should_monitor_vm passes (with continue), the broken
+        recovery check is not reached for that VM."""
+        d = self._setup(broken_tag="broken")
+        domain = _make_domain("normal-vm", "uuid-normal")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=True), \
+             patch.object(d, "_is_vm_stale", return_value=True), \
+             patch.object(d, "_is_broken_and_recoverable") as mock_broken:
+            await d._run_stale_tag_scan()
+
+        # continue in the normal path means broken check never called
+        mock_broken.assert_not_called()
+        d.tag_cleaner.handle_vm_started.assert_awaited_once_with(domain)
+
+    @pytest.mark.asyncio
+    async def test_stale_scan_mixed_stale_and_broken(self):
+        """Stale scan picks up both stale VMs and broken VMs."""
+        d = self._setup(broken_tag="broken")
+        stale_vm = _make_domain("stale-vm", "uuid-stale")
+        broken_vm = _make_domain("broken-vm", "uuid-broken")
+        clean_vm = _make_domain("clean-vm", "uuid-clean")
+        d.conn.listAllDomains.return_value = [
+            stale_vm, broken_vm, clean_vm
+        ]
+
+        def mock_should_monitor(domain):
+            return domain.name() == "stale-vm"
+
+        def mock_is_stale(domain):
+            return domain.name() == "stale-vm"
+
+        def mock_is_broken(domain):
+            return domain.name() == "broken-vm"
+
+        with patch.object(d, "_should_monitor_vm",
+                          side_effect=mock_should_monitor), \
+             patch.object(d, "_is_vm_stale",
+                          side_effect=mock_is_stale), \
+             patch.object(d, "_is_broken_and_recoverable",
+                          side_effect=mock_is_broken):
+            await d._run_stale_tag_scan()
+
+        assert d.tag_cleaner.handle_vm_started.await_count == 2
+        d.tag_cleaner.handle_vm_started.assert_any_await(stale_vm)
+        d.tag_cleaner.handle_vm_started.assert_any_await(broken_vm)
+
+    @pytest.mark.asyncio
+    async def test_stale_scan_non_stale_matching_vm_checks_broken(self):
+        """When _should_monitor_vm passes but _is_vm_stale is False,
+        we continue (skip broken check) because the normal path used
+        continue. The broken check only runs for VMs that fail
+        _should_monitor_vm."""
+        d = self._setup(broken_tag="broken")
+        domain = _make_domain("active-vm", "uuid-active")
+        d.conn.listAllDomains.return_value = [domain]
+
+        with patch.object(d, "_should_monitor_vm", return_value=True), \
+             patch.object(d, "_is_vm_stale", return_value=False), \
+             patch.object(d, "_is_broken_and_recoverable") as mock_broken:
+            await d._run_stale_tag_scan()
+
+        # Normal path with continue: broken check never reached
+        mock_broken.assert_not_called()
+        d.tag_cleaner.handle_vm_started.assert_not_called()
 
 
 class TestStaleScanLoop:
@@ -1062,18 +1417,49 @@ class TestHandleVMStartedCallOrdering:
 
     @patch("vm_manager.daemon.get_vm_tags")
     @patch("vm_manager.daemon.vm_matches_tags", return_value=False)
-    def test_get_vm_tags_called_once_when_filter_fails(self, _m_matches, m_tags):
-        """If the filter rejects the VM, we return early — only one call."""
+    def test_get_vm_tags_called_once_when_filter_fails_no_broken_tag(
+        self, _m_matches, m_tags
+    ):
+        """If filter rejects and no broken_tag configured, get_vm_tags
+        called once (in _should_monitor_vm only)."""
         m_tags.return_value = ["unrelated"]
 
-        d = _make_daemon(monitor_tags=["linux-test"], tags_to_remove=["used"])
+        d = _make_daemon(
+            monitor_tags=["linux-test"], tags_to_remove=["used"],
+            broken_tag=None,
+        )
         d.tag_cleaner = Mock()
         d.tag_cleaner.handle_vm_started = AsyncMock()
         domain = _make_domain()
 
         d._handle_vm_started(domain)
 
+        # Only _should_monitor_vm calls get_vm_tags;
+        # _is_broken_and_recoverable returns False early (no broken_tag)
         assert m_tags.call_count == 1
+
+    @patch("vm_manager.daemon.get_vm_tags")
+    @patch("vm_manager.daemon.vm_matches_tags", return_value=False)
+    def test_get_vm_tags_called_twice_when_filter_fails_with_broken_tag(
+        self, _m_matches, m_tags
+    ):
+        """If filter rejects and broken_tag is configured, get_vm_tags
+        is called twice (once in _should_monitor_vm, once in
+        _is_broken_and_recoverable)."""
+        m_tags.return_value = ["unrelated"]
+
+        d = _make_daemon(
+            monitor_tags=["linux-test"], tags_to_remove=["used"],
+            broken_tag="broken",
+        )
+        d.tag_cleaner = Mock()
+        d.tag_cleaner.handle_vm_started = AsyncMock()
+        domain = _make_domain()
+
+        d._handle_vm_started(domain)
+
+        # _should_monitor_vm + _is_broken_and_recoverable
+        assert m_tags.call_count == 2
 
     @staticmethod
     async def _call(daemon, domain):
