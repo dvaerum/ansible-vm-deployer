@@ -90,7 +90,11 @@ class TagCleaner:
         self.on_broken_retry_delay = on_broken_retry_delay
         self.libvirt_uri = libvirt_uri
 
-    async def handle_vm_started(self, domain: libvirt.virDomain) -> None:
+    async def handle_vm_started(
+        self,
+        domain: libvirt.virDomain,
+        is_recovery: bool = False
+    ) -> None:
         """
         Handle a VM start event.
 
@@ -99,6 +103,8 @@ class TagCleaner:
 
         Args:
             domain: The libvirt domain that started
+            is_recovery: True if this is a broken VM recovery session
+                (changes logging context, does not alter behavior)
         """
         try:
             vm_name = domain.name()
@@ -109,7 +115,7 @@ class TagCleaner:
 
         # Create a task to monitor this VM (pass name/uuid, not domain object)
         task = asyncio.create_task(
-            self._monitor_vm(vm_uuid, vm_name)
+            self._monitor_vm(vm_uuid, vm_name, is_recovery=is_recovery)
         )
 
         # Register with tracker (debouncing)
@@ -259,7 +265,8 @@ class TagCleaner:
     async def _monitor_vm(
         self,
         vm_uuid: str,
-        vm_name: str
+        vm_name: str,
+        is_recovery: bool = False
     ) -> None:
         """
         Monitor a VM through a two-phase timeout until SSH becomes available.
@@ -277,11 +284,14 @@ class TagCleaner:
         Args:
             vm_uuid: VM UUID
             vm_name: VM name
+            is_recovery: True if this is a broken VM recovery session
         """
         tracking_stopped = False
+        monitor_type = "recovery" if is_recovery else "normal"
         try:
             logger.info(
-                f"Starting monitoring for VM {vm_name} (uuid={vm_uuid}), "
+                f"Starting {monitor_type} monitoring for VM {vm_name} "
+                f"(uuid={vm_uuid}), "
                 f"broken_timeout={self.broken_timeout}s, "
                 f"on_broken_delay={self.on_broken_delay}s"
             )
@@ -322,17 +332,25 @@ class TagCleaner:
                 return
 
             # ── Phase 1 timed out → mark VM as broken ───────────────
-            logger.warning(
-                f"VM {vm_name} SSH timed out after {self.broken_timeout}s "
-                "(Phase 1), marking as broken"
-            )
-            await self._mark_vm_broken(vm_name, vm_uuid)
+            if is_recovery:
+                logger.warning(
+                    f"VM {vm_name} SSH timed out after "
+                    f"{self.broken_timeout}s (Phase 1), "
+                    "broken tag already present (recovery session)"
+                )
+            else:
+                logger.warning(
+                    f"VM {vm_name} SSH timed out after "
+                    f"{self.broken_timeout}s (Phase 1), "
+                    "marking as broken"
+                )
+                await self._mark_vm_broken(vm_name, vm_uuid)
 
             # Keep the tracker slot occupied during Phase 2. This prevents
             # event handlers and stale scans from starting concurrent
-            # monitoring sessions for the same VM. The slot is freed when
-            # Phase 2 completes (via the finally block) or explicitly in
-            # _handle_successful_repair before starting fresh monitoring.
+            # monitoring sessions for the same VM. The slot is freed in
+            # the finally block, or explicitly by _handle_successful_repair
+            # before starting fresh monitoring.
 
             # ── Phase 2: Continue monitoring SSH ─────────────────────
             if self.on_broken:
@@ -385,6 +403,12 @@ class TagCleaner:
                     await self._handle_successful_repair(vm_name, vm_uuid)
                     # Repair freed the tracker and started fresh monitoring.
                     # Prevent the finally block from freeing the new session.
+                    #
+                    # Note: if _handle_successful_repair raised CancelledError,
+                    # we never reach here — tracking_stopped stays False and
+                    # the finally block calls stop_monitoring (which is safe
+                    # even if _handle_successful_repair already called it,
+                    # because stop_monitoring is idempotent).
                     tracking_stopped = True
                 return
 
@@ -406,9 +430,9 @@ class TagCleaner:
             )
 
         finally:
-            # Stop tracking this VM when done — unless we already freed
-            # the slot before Phase 2 (to allow new monitoring sessions
-            # if the VM is restarted externally).
+            # Free the tracker slot unless _handle_successful_repair
+            # already freed it and started a fresh monitoring session
+            # (in which case tracking_stopped is True).
             if not tracking_stopped:
                 await self.vm_tracker.stop_monitoring(vm_uuid)
 

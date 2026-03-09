@@ -1688,7 +1688,7 @@ class TestTagCleanerRaceConditions:
         """
         monitor_calls = 0
 
-        async def mock_monitor(*args):
+        async def mock_monitor(*args, **kwargs):
             nonlocal monitor_calls
             monitor_calls += 1
             await asyncio.sleep(0.1)
