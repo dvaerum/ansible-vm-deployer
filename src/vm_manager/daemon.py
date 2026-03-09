@@ -367,7 +367,7 @@ class VMManagerDaemon:
     def _should_monitor_vm(
         self,
         domain: libvirt.virDomain,
-        vm_tags: Optional[list] = None
+        vm_tags: Optional[List[str]] = None
     ) -> bool:
         """
         Check if a VM matches the monitoring criteria.
@@ -396,7 +396,7 @@ class VMManagerDaemon:
     def _is_vm_stale(
         self,
         domain: libvirt.virDomain,
-        vm_tags: Optional[list] = None
+        vm_tags: Optional[List[str]] = None
     ) -> bool:
         """
         Check if a VM has a stale 'used' tag that should be cleaned up.
@@ -429,15 +429,19 @@ class VMManagerDaemon:
             return True
 
         except Exception as e:
+            try:
+                name = domain.name()
+            except Exception:
+                name = "<unknown>"
             logger.warning(
-                f"Error checking if VM {domain.name()} is stale: {e}"
+                f"Error checking if VM {name} is stale: {e}"
             )
             return False
 
     def _is_broken_and_recoverable(
         self,
         domain: libvirt.virDomain,
-        vm_tags: Optional[list] = None
+        vm_tags: Optional[List[str]] = None
     ) -> bool:
         """
         Check if a VM has the broken tag and should be recovery-monitored.
@@ -477,9 +481,13 @@ class VMManagerDaemon:
             )
 
         except Exception as e:
+            try:
+                name = domain.name()
+            except Exception:
+                name = "<unknown>"
             logger.error(
                 f"Error checking broken VM tags for "
-                f"{domain.name()}: {e}"
+                f"{name}: {e}"
             )
             return False
 

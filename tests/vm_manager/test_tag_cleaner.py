@@ -2368,7 +2368,9 @@ class TestRepairFlow:
             await cleaner._handle_successful_repair("test-vm", "test-uuid-123")
 
             mock_stop.assert_awaited_once_with("test-uuid-123")
-            mock_handle.assert_awaited_once_with(mock_domain)
+            mock_handle.assert_awaited_once_with(
+                mock_domain, is_recovery=True
+            )
             # Broken tag NOT removed — only SSH success should do that
             mock_remove.assert_not_called()
 
@@ -2391,7 +2393,7 @@ class TestRepairFlow:
             call_order.append("stop_monitoring")
             await original_stop(uuid)
 
-        async def tracking_handle(domain):
+        async def tracking_handle(domain, **kwargs):
             call_order.append("handle_vm_started")
 
         with patch.object(vm_tracker, 'stop_monitoring',

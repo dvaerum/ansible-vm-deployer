@@ -103,8 +103,10 @@ class TagCleaner:
 
         Args:
             domain: The libvirt domain that started
-            is_recovery: True if this is a broken VM recovery session
-                (changes logging context, does not alter behavior)
+            is_recovery: True if this is a broken VM recovery session.
+                Affects _monitor_vm behavior: changes log messages to
+                say "recovery" and skips _mark_vm_broken on Phase 1
+                timeout (broken tag is already present).
         """
         try:
             vm_name = domain.name()
@@ -509,7 +511,7 @@ class TagCleaner:
                 f"Triggering re-monitoring for VM {vm_name} "
                 "(broken tag kept until SSH succeeds)"
             )
-            await self.handle_vm_started(domain)
+            await self.handle_vm_started(domain, is_recovery=True)
         except Exception as e:
             logger.warning(
                 f"Could not trigger re-monitoring for {vm_name} after "

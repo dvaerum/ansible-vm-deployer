@@ -61,8 +61,13 @@ def _current_time():
 
     Matches the timestamp format used by the official
     ansible.posix.json callback.
+
+    Uses datetime.now(UTC) instead of the deprecated utcnow().
+    The tzinfo is stripped before isoformat() so the output is
+    a bare ISO timestamp with Z suffix (no +00:00 offset).
     """
-    return '%sZ' % datetime.datetime.utcnow().isoformat()
+    utc_now = datetime.datetime.now(datetime.UTC)
+    return '%sZ' % utc_now.replace(tzinfo=None).isoformat()
 
 
 class CallbackModule(DefaultCallbackModule):
