@@ -10,8 +10,8 @@
     let
       # Overlay providing our packages
       overlay = final: prev: {
-        ansible-deployer = self.packages.${final.system}.ansible-deployer;
-        vm-manager = self.packages.${final.system}.vm-manager;
+        ansible-deployer = self.packages.${final.stdenv.hostPlatform.system}.ansible-deployer;
+        vm-manager = self.packages.${final.stdenv.hostPlatform.system}.vm-manager;
       };
     in
     flake-utils.lib.eachDefaultSystem (system:
