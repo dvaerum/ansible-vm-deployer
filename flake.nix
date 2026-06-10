@@ -19,7 +19,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
         
         # Python package set
-        pythonEnv = pkgs.python311.withPackages (ps: with ps; [
+        pythonEnv = pkgs.python3.withPackages (ps: with ps; [
           libvirt
           click
           pydantic
@@ -40,17 +40,17 @@
           libvirt
           qemu
           ansible
-          python311
+          python3
         ];
 
       in {
         # Development shell
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            python311
-            python311Packages.pip
-            python311Packages.setuptools
-            python311Packages.wheel
+            python3
+            python3Packages.pip
+            python3Packages.setuptools
+            python3Packages.wheel
           ];
           
           packages = [
@@ -69,7 +69,7 @@
         # Packages
         packages = {
           # Ansible Deployer package
-          ansible-deployer = pkgs.python311Packages.buildPythonPackage {
+          ansible-deployer = pkgs.python3Packages.buildPythonPackage {
             pname = "ansible-deployer";
             version = "0.1.0";
             
@@ -77,12 +77,12 @@
             
             src = ./.;
             
-            build-system = with pkgs.python311Packages; [
+            build-system = with pkgs.python3Packages; [
               setuptools
               wheel
             ];
             
-            propagatedBuildInputs = with pkgs.python311Packages; [
+            propagatedBuildInputs = with pkgs.python3Packages; [
               libvirt
               click
               pydantic
@@ -92,7 +92,7 @@
               paramiko
             ];
 
-            nativeCheckInputs = with pkgs.python311Packages; [
+            nativeCheckInputs = with pkgs.python3Packages; [
               pytest
               pytest-asyncio
             ];
@@ -110,7 +110,7 @@
           };
 
           # VM Manager package
-          vm-manager = pkgs.python311Packages.buildPythonPackage {
+          vm-manager = pkgs.python3Packages.buildPythonPackage {
             pname = "vm-manager";
             version = "0.1.0";
             
@@ -118,17 +118,17 @@
             
             src = ./.;
             
-            build-system = with pkgs.python311Packages; [
+            build-system = with pkgs.python3Packages; [
               setuptools
               wheel
             ];
             
-            propagatedBuildInputs = with pkgs.python311Packages; [
+            propagatedBuildInputs = with pkgs.python3Packages; [
               libvirt
               paramiko
             ];
 
-            nativeCheckInputs = with pkgs.python311Packages; [
+            nativeCheckInputs = with pkgs.python3Packages; [
               pytest
               pytest-asyncio
             ];
